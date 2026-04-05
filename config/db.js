@@ -1,31 +1,53 @@
-import "dotenv/config";
-import pkg from "pg";
+import pg from "pg";
+import { env } from "./env.js";
 
-const { Pool } = pkg;
+const { Pool } = pg;
 
 let pool = null;
 
 export function getPool() {
-  if (pool) return pool;
+  if (!pool) {
+    if (!env.databaseUrl) {
+      console.warn("[DB] DATABASE_URL não definida");
+      return null;
+    }
 
-  const DATABASE_URL = process.env.DATABASE_URL;
-
-  if (!DATABASE_URL) {
-    console.warn("[DB] DATABASE_URL não definida");
-    return null;
-  }
-
-  try {
     pool = new Pool({
-      connectionString: DATABASE_URL,
+      connectionString: env.databaseUrl,
       ssl: { rejectUnauthorized: false },
     });
 
-    console.log("[DB] Conectado com sucesso");
+    pool.on("error", (err) => {
+      console.error("[DB ERROR]", err.message);
+    });
 
-    return pool;
-  } catch (err) {
-    console.error("[DB ERROR]", err.message);
-    return null;
+    console.log("[DB] Pool criado com sucesso");
   }
+
+  return pool;
+}
+
+export async function testDbConnection() {
+  try {
+    const db = getPool();
+    if (!db) return { ok: false };
+
+    await db.query("SELECT 1");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/*
+🔥 ESSA PARTE RESOLVE SEU ERRO
+*/
+export async function query(text, params = []) {
+  const db = getPool();
+
+  if (!db) {
+    throw new Error("Banco não configurado");
+  }
+
+  return db.query(text, params);
 }
