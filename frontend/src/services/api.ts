@@ -33,3 +33,11 @@ export async function sendChatMessage(
 
   return data;
 }
+
+export async function resolveNavigationDestination(message: string) {
+  const { data } = await api.post("/api/navigation/resolve", {
+    message,
+  });
+
+  return data;
+}

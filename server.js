@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import fetch from "node-fetch";
 import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
@@ -30,6 +31,7 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
   "https://megan-ai-clean-wnst.vercel.app",
+  "https://hoppscotch.io",
   process.env.FRONTEND_URL,
 ].filter(Boolean);
 
@@ -38,7 +40,11 @@ app.use(
     origin(origin, callback) {
       if (!origin) return callback(null, true);
 
-      if (allowedOrigins.includes(origin)) {
+      if (
+        allowedOrigins.some((allowed) =>
+          origin.startsWith(allowed)
+        )
+      ) {
         return callback(null, true);
       }
 
@@ -78,6 +84,14 @@ function normalizeLocationPayload(deviceLocation) {
     accuracy:
       typeof deviceLocation.accuracy === "number"
         ? deviceLocation.accuracy
+        : null,
+    speed:
+      typeof deviceLocation.speed === "number" && !Number.isNaN(deviceLocation.speed)
+        ? deviceLocation.speed
+        : null,
+    heading:
+      typeof deviceLocation.heading === "number" && !Number.isNaN(deviceLocation.heading)
+        ? deviceLocation.heading
         : null,
   };
 }
@@ -232,6 +246,252 @@ function buildMeganSystemPrompt({ weather, location }) {
 }
 
 /* =========================
+   NAVIGATION HELPERS
+========================= */
+function detectNavigationIntent(message) {
+  const original = String(message || "").trim();
+  const text = original.toLowerCase();
+
+  const patterns = [
+    "navegar para ",
+    "navegação para ",
+    "ir para ",
+    "me leve para ",
+    "quero ir para ",
+    "rota para ",
+    "abrir rota para ",
+    "iniciar rota para ",
+    "traçar rota para ",
+  ];
+
+  for (const pattern of patterns) {
+    const index = text.indexOf(pattern);
+    if (index !== -1) {
+      const destinationText = original.slice(index + pattern.length).trim();
+      if (destinationText) {
+        return {
+          isNavigationRequest: true,
+          destinationText,
+        };
+      }
+    }
+  }
+
+  return {
+    isNavigationRequest: false,
+    destinationText: "",
+  };
+}
+
+function normalizeTextForMatch(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function getKnownDestination(query) {
+  const normalized = normalizeTextForMatch(query);
+
+  const knownPlaces = [
+    {
+      keys: ["praca da moca", "praca da moca diadema", "praca da moca em diadema"],
+      latitude: -23.686358,
+      longitude: -46.622981,
+      name: "Praça da Moça, Centro, Diadema, São Paulo, Brasil",
+    },
+    {
+      keys: ["aeroporto de congonhas", "congonhas", "aeroporto congonhas"],
+      latitude: -23.6261109,
+      longitude: -46.6565712,
+      name: "Aeroporto de Congonhas, São Paulo, Brasil",
+    },
+    {
+      keys: ["aeroporto de guarulhos", "gru", "aeroporto internacional de guarulhos"],
+      latitude: -23.435556,
+      longitude: -46.473056,
+      name: "Aeroporto Internacional de Guarulhos, São Paulo, Brasil",
+    },
+    {
+      keys: ["avenida paulista", "paulista"],
+      latitude: -23.5613991,
+      longitude: -46.6565712,
+      name: "Avenida Paulista, São Paulo, Brasil",
+    },
+  ];
+
+  for (const place of knownPlaces) {
+    if (place.keys.some((key) => normalized.includes(key))) {
+      return {
+        latitude: place.latitude,
+        longitude: place.longitude,
+        name: place.name,
+      };
+    }
+  }
+
+  return null;
+}
+
+async function geocodeWithOpenMeteo(query) {
+  const url =
+    `https://geocoding-api.open-meteo.com/v1/search` +
+    `?name=${encodeURIComponent(query)}` +
+    `&count=5` +
+    `&language=pt` +
+    `&format=json`;
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Open-Meteo geocoding falhou (${response.status})`);
+  }
+
+  const data = await response.json();
+  const first = data?.results?.[0];
+
+  if (!first) return null;
+
+  return {
+    latitude: first.latitude,
+    longitude: first.longitude,
+    name: [first.name, first.admin1, first.country].filter(Boolean).join(", "),
+  };
+}
+
+async function geocodeWithNominatim(query) {
+  const url =
+    `https://nominatim.openstreetmap.org/search` +
+    `?q=${encodeURIComponent(query)}` +
+    `&format=jsonv2` +
+    `&limit=1` +
+    `&addressdetails=1`;
+
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": "Megan-OS/1.0",
+      "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Nominatim falhou (${response.status})`);
+  }
+
+  const data = await response.json();
+  const first = data?.[0];
+
+  if (!first) return null;
+
+  return {
+    latitude: Number(first.lat),
+    longitude: Number(first.lon),
+    name: first.display_name || query,
+  };
+}
+
+async function geocodeDestination(query) {
+  const normalized = String(query || "").trim();
+  if (!normalized) return null;
+
+  const knownPlace = getKnownDestination(normalized);
+  if (knownPlace) return knownPlace;
+
+  const candidates = [
+    normalized,
+    `${normalized}, Brasil`,
+    `${normalized}, São Paulo, Brasil`,
+    `${normalized}, Diadema, São Paulo, Brasil`,
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const openMeteoResult = await geocodeWithOpenMeteo(candidate);
+      if (openMeteoResult) return openMeteoResult;
+    } catch (error) {
+      console.error("[OPEN_METEO GEOCODING ERROR]", error?.message || error);
+    }
+
+    try {
+      const nominatimResult = await geocodeWithNominatim(candidate);
+      if (nominatimResult) return nominatimResult;
+    } catch (error) {
+      console.error("[NOMINATIM GEOCODING ERROR]", error?.message || error);
+    }
+  }
+
+  return null;
+}
+
+/* =========================
+   DRIVING MODE / RADAR
+========================= */
+const RADARS = [
+  {
+    id: "radar-1",
+    name: "Radar exemplo - Centro SP",
+    lat: -23.55052,
+    lng: -46.633308,
+    speedLimit: 60,
+    type: "fixo",
+  },
+];
+
+function toRadians(value) {
+  return (value * Math.PI) / 180;
+}
+
+function calculateDistanceInKm(lat1, lon1, lat2, lon2) {
+  const earthRadiusKm = 6371;
+  const dLat = toRadians(lat2 - lat1);
+  const dLon = toRadians(lon2 - lon1);
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRadians(lat1)) *
+      Math.cos(toRadians(lat2)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return earthRadiusKm * c;
+}
+
+function metersFromKm(km) {
+  return Math.round(km * 1000);
+}
+
+function normalizeSpeedKmh(speed) {
+  if (typeof speed !== "number" || Number.isNaN(speed)) return null;
+
+  const kmh = speed * 3.6;
+  return Math.round(kmh);
+}
+
+function findNearestRadar(latitude, longitude) {
+  let nearest = null;
+
+  for (const radar of RADARS) {
+    const distanceKm = calculateDistanceInKm(
+      latitude,
+      longitude,
+      radar.lat,
+      radar.lng
+    );
+
+    if (!nearest || distanceKm < nearest.distanceKm) {
+      nearest = {
+        ...radar,
+        distanceKm,
+        distanceMeters: metersFromKm(distanceKm),
+      };
+    }
+  }
+
+  return nearest;
+}
+
+/* =========================
    HEALTH
 ========================= */
 app.get("/", (_req, res) => {
@@ -273,7 +533,55 @@ app.get("/api/system/status", (_req, res) => {
 });
 
 /* =========================
-   CHAT COM IA + LOCALIZAÇÃO + CLIMA
+   NAVIGATION RESOLVE API
+========================= */
+app.post("/api/navigation/resolve", async (req, res) => {
+  try {
+    const { message } = req.body || {};
+
+    const navigationIntent = detectNavigationIntent(message);
+
+    if (!navigationIntent.isNavigationRequest) {
+      return res.json({
+        ok: true,
+        navigation: {
+          active: false,
+          destination: null,
+        },
+      });
+    }
+
+    const destination = await geocodeDestination(navigationIntent.destinationText);
+
+    if (!destination) {
+      return res.json({
+        ok: true,
+        navigation: {
+          active: false,
+          destination: null,
+        },
+      });
+    }
+
+    return res.json({
+      ok: true,
+      navigation: {
+        active: true,
+        destination,
+      },
+    });
+  } catch (error) {
+    console.error("[NAVIGATION RESOLVE ERROR]", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Erro ao resolver destino da navegação",
+    });
+  }
+});
+
+/* =========================
+   CHAT COM IA + LOCALIZAÇÃO + CLIMA + NAVEGAÇÃO
 ========================= */
 app.post("/api/chat", async (req, res) => {
   try {
@@ -300,6 +608,36 @@ app.post("/api/chat", async (req, res) => {
           normalizedLocation.longitude
         )
       : null;
+
+    const navigationIntent = detectNavigationIntent(message);
+    if (navigationIntent.isNavigationRequest) {
+      const destination = await geocodeDestination(navigationIntent.destinationText);
+
+      if (destination) {
+        return res.json({
+          ok: true,
+          reply: `Certo, abrindo a navegação para ${destination.name}.`,
+          meta: {
+            hasLocation: Boolean(normalizedLocation),
+            weather,
+            navigation: {
+              active: true,
+              destination,
+            },
+          },
+        });
+      }
+
+      return res.json({
+        ok: true,
+        reply: `Entendi o destino "${navigationIntent.destinationText}", mas não consegui localizar esse lugar com precisão. Tente enviar o nome com cidade e estado.`,
+        meta: {
+          hasLocation: Boolean(normalizedLocation),
+          weather,
+          navigation: null,
+        },
+      });
+    }
 
     const systemPrompt = buildMeganSystemPrompt({
       weather,
@@ -330,6 +668,7 @@ app.post("/api/chat", async (req, res) => {
       meta: {
         hasLocation: Boolean(normalizedLocation),
         weather,
+        navigation: null,
       },
     });
   } catch (error) {
@@ -338,6 +677,77 @@ app.post("/api/chat", async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: "Erro ao gerar resposta da Megan",
+    });
+  }
+});
+
+/* =========================
+   DRIVING API
+========================= */
+app.post("/api/driving", async (req, res) => {
+  try {
+    const { latitude, longitude, speed, heading } = req.body || {};
+
+    const lat = Number(latitude);
+    const lng = Number(longitude);
+
+    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+      return res.status(400).json({
+        ok: false,
+        error: "latitude e longitude são obrigatórios",
+      });
+    }
+
+    const nearestRadar = findNearestRadar(lat, lng);
+    const speedKmh = normalizeSpeedKmh(
+      typeof speed === "number" ? speed : Number(speed)
+    );
+
+    let alert = null;
+
+    if (nearestRadar && nearestRadar.distanceMeters <= 800) {
+      alert = `🚨 Radar ${nearestRadar.type} à frente em ${nearestRadar.distanceMeters} m. Limite: ${nearestRadar.speedLimit} km/h.`;
+    }
+
+    if (
+      nearestRadar &&
+      nearestRadar.distanceMeters <= 800 &&
+      speedKmh !== null &&
+      speedKmh > nearestRadar.speedLimit
+    ) {
+      alert = `🚨 Atenção: radar ${nearestRadar.type} em ${nearestRadar.distanceMeters} m. Você está a ${speedKmh} km/h e o limite é ${nearestRadar.speedLimit} km/h.`;
+    }
+
+    return res.json({
+      ok: true,
+      mode: "driving",
+      alert,
+      radar: nearestRadar
+        ? {
+            id: nearestRadar.id,
+            name: nearestRadar.name,
+            type: nearestRadar.type,
+            distanceMeters: nearestRadar.distanceMeters,
+            speedLimit: nearestRadar.speedLimit,
+            latitude: nearestRadar.lat,
+            longitude: nearestRadar.lng,
+          }
+        : null,
+      meta: {
+        speedKmh,
+        heading:
+          typeof heading === "number" && !Number.isNaN(heading)
+            ? Math.round(heading)
+            : null,
+        hasRadarBase: RADARS.length > 0,
+      },
+    });
+  } catch (error) {
+    console.error("[DRIVING ERROR]", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Erro ao processar modo direção",
     });
   }
 });
@@ -375,5 +785,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log("Frontend:", process.env.FRONTEND_URL);
   console.log("Modelo Gemini:", GEMINI_MODEL);
   console.log("Allowed Origins:", allowedOrigins);
+  console.log("Modo direção / radares:", `/api/driving (${RADARS.length} radar(es) na base)`);
   console.log("==================================");
 });

@@ -1,229 +1,278 @@
+import MapView from "./components/MapView";
 import { useEffect, useState } from "react";
-import { checkHealth, sendChatMessage } from "./services/api";
+import {
+  checkHealth,
+  sendChatMessage,
+  resolveNavigationDestination,
+} from "./services/api";
 
 type Message = {
   role: "user" | "assistant";
   content: string;
 };
 
-type DeviceLocation = {
-  latitude: number;
-  longitude: number;
-  accuracy?: number | null;
-} | null;
+function isNavigationRequest(message: string) {
+  const text = String(message || "").toLowerCase().trim();
+
+  return [
+    "navegar para ",
+    "navegação para ",
+    "ir para ",
+    "me leve para ",
+    "quero ir para ",
+    "rota para ",
+    "abrir rota para ",
+    "iniciar rota para ",
+    "traçar rota para ",
+  ].some((pattern) => text.includes(pattern));
+}
 
 export default function App() {
-  const [status, setStatus] = useState("Verificando backend...");
+  const [status, setStatus] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [deviceLocation, setDeviceLocation] = useState<DeviceLocation>(null);
-  const [locationStatus, setLocationStatus] = useState("Solicitando localização...");
+  const [deviceLocation, setDeviceLocation] = useState<any>(null);
+  const [destination, setDestination] = useState<any>(null);
+  const [showMap, setShowMap] = useState(false);
 
   useEffect(() => {
-    async function loadHealth() {
-      try {
-        const result = await checkHealth();
-        if (result?.ok) {
-          setStatus("Backend online");
-        } else {
-          setStatus("Backend respondeu com alerta");
-        }
-      } catch {
-        setStatus("Erro ao conectar com backend");
-      }
-    }
-
-    loadHealth();
+    checkHealth().then(() => setStatus("Online"));
   }, []);
 
   useEffect(() => {
-    if (!navigator.geolocation) {
-      setLocationStatus("Geolocalização não suportada no navegador");
-      return;
-    }
-
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
         setDeviceLocation({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          accuracy: position.coords.accuracy,
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
         });
-        setLocationStatus("Localização ativa");
       },
-      () => {
-        setDeviceLocation(null);
-        setLocationStatus("Localização não permitida");
+      (error) => {
+        console.log("Erro geolocalização:", error);
       },
       {
         enableHighAccuracy: true,
+        maximumAge: 1000,
         timeout: 10000,
-        maximumAge: 300000,
       }
     );
+
+    return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
   async function handleSend() {
     const trimmed = input.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed) return;
 
-    const userMessage: Message = {
-      role: "user",
-      content: trimmed,
-    };
+    let navigationReply = "";
+    let navigationResolved = false;
 
-    setMessages((prev) => [...prev, userMessage]);
-    setInput("");
-    setLoading(true);
+    setMessages((prev) => [
+      ...prev,
+      { role: "user", content: trimmed },
+    ]);
 
     try {
-      const result = await sendChatMessage(trimmed, deviceLocation);
+      if (isNavigationRequest(trimmed)) {
+        try {
+          const navResult = await resolveNavigationDestination(trimmed);
 
-      const weather = result?.meta?.weather;
-      const weatherText =
-        weather && weather.temperature !== null
-          ? `\n\n🌤️ Clima atual: ${weather.weatherText}, ${weather.temperature}°C`
-          : "";
+          if (
+            navResult?.ok &&
+            navResult?.navigation?.active &&
+            navResult?.navigation?.destination
+          ) {
+            setDestination(navResult.navigation.destination);
+            setShowMap(true);
+            navigationResolved = true;
+            navigationReply = `Certo, abrindo a navegação para ${navResult.navigation.destination.name}.`;
+          }
+        } catch (err) {
+          console.log("Erro navigation resolve:", err);
+        }
+      }
 
-      const assistantReply =
-        (result?.reply || result?.response || result?.message || "Sem resposta da Megan.") +
-        weatherText;
+      const res = await sendChatMessage(trimmed, deviceLocation);
 
-      const assistantMessage: Message = {
-        role: "assistant",
-        content: assistantReply,
-      };
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: navigationResolved
+            ? navigationReply
+            : res.reply,
+        },
+      ]);
 
-      setMessages((prev) => [...prev, assistantMessage]);
-    } catch (error: any) {
-      const assistantMessage: Message = {
-        role: "assistant",
-        content:
-          error?.response?.data?.error ||
-          "Erro ao conectar com o backend da Megan OS.",
-      };
+      if (res?.meta?.navigation?.active && res?.meta?.navigation?.destination) {
+        setDestination(res.meta.navigation.destination);
+        setShowMap(true);
+      }
+    } catch (error) {
+      console.log("Erro ao enviar mensagem:", error);
 
-      setMessages((prev) => [...prev, assistantMessage]);
-    } finally {
-      setLoading(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: "Erro ao processar sua solicitação.",
+        },
+      ]);
     }
+
+    setInput("");
   }
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#0b1020", color: "#fff" }}>
+    <div style={{ display: "flex", height: "100vh", background: "#343541" }}>
       <aside
         style={{
-          width: 280,
-          background: "#111827",
+          width: 260,
+          background: "#202123",
           padding: 20,
-          borderRight: "1px solid #1f2937",
+          color: "#fff",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "space-between",
         }}
       >
-        <h2 style={{ marginTop: 0 }}>Megan OS</h2>
-        <p style={{ color: "#94a3b8", marginBottom: 8 }}>{status}</p>
-        <p style={{ color: "#94a3b8", marginTop: 0 }}>{locationStatus}</p>
-      </aside>
+        <div>
+          <h2>Megan OS</h2>
+          <p style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</p>
+        </div>
 
-      <main style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-        <header
+        <button
+          onClick={() => setShowMap((prev) => !prev)}
           style={{
-            padding: 20,
-            borderBottom: "1px solid #1f2937",
+            background: "#10a37f",
+            border: "none",
+            padding: 12,
+            borderRadius: 8,
+            color: "#fff",
+            cursor: "pointer",
           }}
         >
-          <h1 style={{ margin: 0 }}>Megan OS</h1>
-          <p style={{ margin: "8px 0 0", color: "#94a3b8" }}>
-            Humana, contextual, com clima real e localização ativa
-          </p>
-        </header>
+          🗺️ {showMap ? "Fechar mapa" : "Abrir mapa"}
+        </button>
+      </aside>
 
-        <section
+      <main
+        style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "space-between",
+        }}
+      >
+        <div
           style={{
             flex: 1,
             overflowY: "auto",
             padding: 20,
           }}
         >
-          {messages.length === 0 ? (
+          {messages.map((m, i) => (
             <div
+              key={i}
               style={{
-                maxWidth: 700,
-                margin: "80px auto 0",
-                textAlign: "center",
-                color: "#cbd5e1",
+                display: "flex",
+                justifyContent: m.role === "user" ? "flex-end" : "flex-start",
+                marginBottom: 10,
               }}
             >
-              <h3>Bem-vindo à Megan OS</h3>
-              <p>Agora a Megan pode usar sua localização e clima real na conversa.</p>
-            </div>
-          ) : (
-            messages.map((message, index) => (
               <div
-                key={index}
                 style={{
-                  display: "flex",
-                  justifyContent: message.role === "user" ? "flex-end" : "flex-start",
-                  marginBottom: 16,
+                  background: m.role === "user" ? "#10a37f" : "#444654",
+                  padding: 12,
+                  borderRadius: 10,
+                  maxWidth: "60%",
+                  color: "#fff",
+                  whiteSpace: "pre-wrap",
                 }}
               >
-                <div
-                  style={{
-                    maxWidth: "80%",
-                    padding: "14px 16px",
-                    borderRadius: 16,
-                    background: message.role === "user" ? "#14b8a6" : "#1f2937",
-                    color: "#fff",
-                    whiteSpace: "pre-wrap",
-                  }}
-                >
-                  {message.content}
-                </div>
+                {m.content}
               </div>
-            ))
-          )}
-        </section>
+            </div>
+          ))}
+        </div>
 
         <div
           style={{
-            display: "flex",
-            gap: 12,
             padding: 20,
-            borderTop: "1px solid #1f2937",
-            background: "#0f172a",
+            borderTop: "1px solid #444",
           }}
         >
-          <input
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Digite sua mensagem para a Megan..."
+          <div
             style={{
-              flex: 1,
-              padding: 14,
-              borderRadius: 12,
-              border: "1px solid #334155",
-              outline: "none",
-              fontSize: 15,
-            }}
-          />
-          <button
-            onClick={handleSend}
-            disabled={loading}
-            style={{
-              minWidth: 120,
-              border: 0,
-              borderRadius: 12,
-              background: "#14b8a6",
-              color: "#fff",
-              fontWeight: 700,
-              cursor: loading ? "not-allowed" : "pointer",
-              opacity: loading ? 0.7 : 1,
+              display: "flex",
+              gap: 10,
             }}
           >
-            {loading ? "Enviando..." : "Enviar"}
-          </button>
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  handleSend();
+                }
+              }}
+              placeholder="Digite uma mensagem ou peça navegação..."
+              style={{
+                flex: 1,
+                padding: 12,
+                borderRadius: 8,
+                border: "none",
+                outline: "none",
+              }}
+            />
+            <button
+              onClick={handleSend}
+              style={{
+                background: "#10a37f",
+                border: "none",
+                padding: "0 20px",
+                borderRadius: 8,
+                color: "#fff",
+                cursor: "pointer",
+              }}
+            >
+              Enviar
+            </button>
+          </div>
         </div>
       </main>
+
+      {showMap && deviceLocation && (
+        <div
+          style={{
+            width: 420,
+            background: "#111827",
+            padding: 10,
+            color: "#fff",
+            borderLeft: "1px solid #2a2b32",
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+          }}
+        >
+          {!destination && (
+            <div
+              style={{
+                background: "#1f2937",
+                padding: 12,
+                borderRadius: 8,
+                fontSize: 14,
+              }}
+            >
+              Mapa aberto. Para iniciar uma rota, peça no chat algo como:
+              <br />
+              <strong>“navegar para Praça da Moça Diadema”</strong>
+            </div>
+          )}
+
+          <MapView location={deviceLocation} destination={destination} />
+        </div>
+      )}
     </div>
   );
 }
