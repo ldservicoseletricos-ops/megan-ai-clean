@@ -1,0 +1,30 @@
+{
+  "name": "megan-backend",
+  "version": "1.0.0",
+  "description": "Megan OS Backend SaaS (Auth, Chat, AI, Billing, Upload)",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "check": "node -e \"console.log('Backend OK')\""
+  },
+  "author": "Luiz Rosa",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@google/genai": "^1.46.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.5",
+    "express": "^5.2.1",
+    "google-auth-library": "^10.6.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.1.1",
+    "nodemailer": "^6.10.1",
+    "pg": "^8.12.0",
+    "stripe": "^14.25.0"
+  }
+}
