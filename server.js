@@ -1,18 +1,14 @@
-<<<<<<< HEAD:server.js
 import "dotenv/config";
 import dotenv from "dotenv";
-dotenv.config(); // 🔥 TEM QUE SER PRIMEIRO
+dotenv.config();
 
-=======
->>>>>>> b6c15da (feat: backend completo + correções auth, memory e estrutura):backend/server.js
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 
-import { env, logEnvStatus } from "./config/env.js";
-import { getPool, testDbConnection } from "./config/db.js";
+import { env } from "./config/env.js";
+import { getPool, testDatabase } from "./config/db.js";
 
 import authRouter from "./routes/auth.route.js";
 import billingRouter from "./routes/billing.route.js";
@@ -22,8 +18,6 @@ import systemRouter from "./routes/system.route.js";
 import toolsRouter from "./routes/tools.route.js";
 
 import { uploadErrorHandler } from "./middleware/upload.js";
-
-dotenv.config();
 
 const app = express();
 const PORT = env.port || 10000;
@@ -74,7 +68,12 @@ app.use(
   cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) return callback(null, true);
+
+      const normalizedOrigin = normalizeUrl(origin);
+
+      if (allowedOrigins.includes(normalizedOrigin)) {
+        return callback(null, true);
+      }
 
       console.warn("[CORS] Origem bloqueada:", origin);
       return callback(new Error(`Origem não permitida por CORS: ${origin}`));
@@ -116,7 +115,7 @@ app.get("/", (_req, res) => {
 });
 
 app.get("/api/health", async (_req, res) => {
-  const dbStatus = await testDbConnection();
+  const dbStatus = await testDatabase();
 
   return res.status(dbStatus.ok ? 200 : 500).json({
     ok: dbStatus.ok,
@@ -171,7 +170,6 @@ app.use((error, _req, res, _next) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  logEnvStatus();
   console.log("==================================");
   console.log("Megan OS Backend iniciado");
   console.log("Porta:", PORT);
@@ -179,5 +177,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log("Frontend:", env.frontendUrl || "não definido");
   console.log("Banco:", pool ? "configurado" : "não configurado");
   console.log("Uploads:", path.join(__dirname, "uploads"));
+  console.log("Allowed Origins:", allowedOrigins);
   console.log("==================================");
 });
