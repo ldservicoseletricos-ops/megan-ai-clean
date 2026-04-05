@@ -1,25 +1,33 @@
 import axios from "axios";
-import type { ChatApiResponse } from "../types/chat";
 
-const API_URL = import.meta.env.VITE_API_URL?.trim();
+const API_URL = import.meta.env.VITE_API_URL;
 
 if (!API_URL) {
-  throw new Error("VITE_API_URL não configurado no frontend.");
+  throw new Error("VITE_API_URL não configurado");
 }
 
 export const api = axios.create({
   baseURL: API_URL,
   headers: {
-    "Content-Type": "application/json"
-  }
+    "Content-Type": "application/json",
+  },
 });
 
+/* =========================
+   HEALTH CHECK
+========================= */
 export async function checkHealth() {
-  const response = await api.get("/api/health");
-  return response.data;
+  const { data } = await api.get("/api/health");
+  return data;
 }
 
-export async function sendChatMessage(message: string): Promise<ChatApiResponse> {
-  const response = await api.post("/api/chat", { message });
-  return response.data;
+/* =========================
+   CHAT
+========================= */
+export async function sendChatMessage(message: string) {
+  const { data } = await api.post("/api/chat", {
+    message,
+  });
+
+  return data;
 }

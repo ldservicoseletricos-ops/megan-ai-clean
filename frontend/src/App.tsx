@@ -1,100 +1,186 @@
-import { useEffect, useMemo, useState } from "react";
-import Sidebar from "./components/Sidebar";
-import MessageBubble from "./components/MessageBubble";
-import Composer from "./components/Composer";
+import { useEffect, useState } from "react";
 import { checkHealth, sendChatMessage } from "./services/api";
-import type { ChatMessage } from "./types/chat";
 
-function createMessage(role: ChatMessage["role"], content: string): ChatMessage {
-  return {
-    id: `${role}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    role,
-    content,
-    createdAt: new Date().toISOString()
-  };
-}
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+};
 
 export default function App() {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [backendStatus, setBackendStatus] = useState("Verificando backend...");
+  const [status, setStatus] = useState("Verificando...");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
     async function loadHealth() {
       try {
-        const health = await checkHealth();
-        if (health?.ok) {
-          setBackendStatus("Backend online");
+        const result = await checkHealth();
+        if (result?.ok) {
+          setStatus("Backend online");
         } else {
-          setBackendStatus("Backend respondeu com alerta");
+          setStatus("Backend respondeu com alerta");
         }
       } catch {
-        setBackendStatus("Falha ao conectar com backend");
+        setStatus("Erro ao conectar com backend");
       }
     }
 
     loadHealth();
   }, []);
 
-  const emptyState = useMemo(() => messages.length === 0, [messages.length]);
+  async function handleSend() {
+    const trimmed = input.trim();
+    if (!trimmed || loading) return;
 
-  function handleNewChat() {
-    setMessages([]);
-  }
+    const userMessage: Message = {
+      role: "user",
+      content: trimmed,
+    };
 
-  async function handleSend(message: string) {
-    const userMessage = createMessage("user", message);
     setMessages((prev) => [...prev, userMessage]);
-    setIsLoading(true);
+    setInput("");
+    setLoading(true);
 
     try {
-      const result = await sendChatMessage(message);
+      const result = await sendChatMessage(trimmed);
 
-      const assistantText =
-        result.reply ||
-        result.response ||
-        result.message ||
+      const assistantReply =
+        result?.reply ||
+        result?.response ||
+        result?.message ||
         "Recebi sua mensagem, mas não veio resposta do backend.";
 
-      const assistantMessage = createMessage("assistant", assistantText);
+      const assistantMessage: Message = {
+        role: "assistant",
+        content: assistantReply,
+      };
+
       setMessages((prev) => [...prev, assistantMessage]);
-    } catch (error) {
-      const assistantMessage = createMessage(
-        "assistant",
-        "Erro ao conectar com o backend da Megan OS."
-      );
+    } catch {
+      const assistantMessage: Message = {
+        role: "assistant",
+        content: "Erro ao conectar com o backend da Megan OS.",
+      };
+
       setMessages((prev) => [...prev, assistantMessage]);
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
   }
 
   return (
-    <div className="layout">
-      <Sidebar onNewChat={handleNewChat} />
+    <div style={{ display: "flex", height: "100vh", background: "#0b1020", color: "#fff" }}>
+      <aside
+        style={{
+          width: 280,
+          background: "#111827",
+          padding: 20,
+          borderRight: "1px solid #1f2937",
+        }}
+      >
+        <h2 style={{ marginTop: 0 }}>Megan OS</h2>
+        <p style={{ color: "#94a3b8" }}>{status}</p>
+      </aside>
 
-      <main className="main">
-        <header className="topbar">
-          <div>
-            <h2>Megan OS</h2>
-            <p>{backendStatus}</p>
-          </div>
+      <main style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+        <header
+          style={{
+            padding: 20,
+            borderBottom: "1px solid #1f2937",
+          }}
+        >
+          <h1 style={{ margin: 0 }}>Megan OS</h1>
+          <p style={{ margin: "8px 0 0", color: "#94a3b8" }}>
+            Resposta em tempo real com sessões persistidas
+          </p>
         </header>
 
-        <section className="chat-area">
-          {emptyState ? (
-            <div className="empty-state">
+        <section
+          style={{
+            flex: 1,
+            overflowY: "auto",
+            padding: 20,
+          }}
+        >
+          {messages.length === 0 ? (
+            <div
+              style={{
+                maxWidth: 700,
+                margin: "80px auto 0",
+                textAlign: "center",
+                color: "#cbd5e1",
+              }}
+            >
               <h3>Bem-vindo à Megan OS</h3>
               <p>Seu backend já está online. Agora você pode testar o chat.</p>
             </div>
           ) : (
-            messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
+            messages.map((message, index) => (
+              <div
+                key={index}
+                style={{
+                  display: "flex",
+                  justifyContent: message.role === "user" ? "flex-end" : "flex-start",
+                  marginBottom: 16,
+                }}
+              >
+                <div
+                  style={{
+                    maxWidth: "80%",
+                    padding: "14px 16px",
+                    borderRadius: 16,
+                    background: message.role === "user" ? "#14b8a6" : "#1f2937",
+                    color: "#fff",
+                    whiteSpace: "pre-wrap",
+                  }}
+                >
+                  {message.content}
+                </div>
+              </div>
             ))
           )}
         </section>
 
-        <Composer onSend={handleSend} isLoading={isLoading} />
+        <div
+          style={{
+            display: "flex",
+            gap: 12,
+            padding: 20,
+            borderTop: "1px solid #1f2937",
+            background: "#0f172a",
+          }}
+        >
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Digite sua mensagem para a Megan..."
+            style={{
+              flex: 1,
+              padding: 14,
+              borderRadius: 12,
+              border: "1px solid #334155",
+              outline: "none",
+              fontSize: 15,
+            }}
+          />
+          <button
+            onClick={handleSend}
+            disabled={loading}
+            style={{
+              minWidth: 120,
+              border: 0,
+              borderRadius: 12,
+              background: "#14b8a6",
+              color: "#fff",
+              fontWeight: 700,
+              cursor: loading ? "not-allowed" : "pointer",
+              opacity: loading ? 0.7 : 1,
+            }}
+          >
+            {loading ? "Enviando..." : "Enviar"}
+          </button>
+        </div>
       </main>
     </div>
   );
