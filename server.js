@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-dotenv.config(); // 🔥 TEM QUE SER PRIMEIRO
+dotenv.config();
 
 import express from "express";
 import cors from "cors";
@@ -83,9 +83,20 @@ app.use((req, _res, next) => {
 });
 
 app.get("/", (_req, res) => {
-  return res.json({
+  return res.status(200).json({
     ok: true,
+    app: "Megan OS Backend",
     status: "online",
+    time: new Date().toISOString(),
+  });
+});
+
+app.get("/api/health", (_req, res) => {
+  return res.status(200).json({
+    ok: true,
+    app: "Megan OS Backend",
+    status: "online",
+    database: pool ? "configurado" : "não configurado",
     time: new Date().toISOString(),
   });
 });
@@ -97,6 +108,27 @@ app.use("/api/chat", chatRouter);
 app.use("/api/memory", memoryRouter);
 app.use("/api/tools", toolsRouter);
 
+app.use((req, res) => {
+  return res.status(404).json({
+    ok: false,
+    error: "Rota não encontrada",
+    path: req.originalUrl,
+  });
+});
+
+app.use((error, _req, res, _next) => {
+  console.error("[GLOBAL ERROR]", error);
+
+  if (res.headersSent) {
+    return;
+  }
+
+  return res.status(500).json({
+    ok: false,
+    error: error?.message || "Erro interno do servidor",
+  });
+});
+
 app.listen(PORT, "0.0.0.0", () => {
   console.log("==================================");
   console.log("Megan OS Backend iniciado");
@@ -104,5 +136,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log("Ambiente:", env.nodeEnv);
   console.log("Frontend:", env.frontendUrl);
   console.log("Banco:", pool ? "configurado" : "não configurado");
+  console.log("Health:", "/api/health");
   console.log("==================================");
 });
