@@ -1,17 +1,12 @@
-import pg from "pg";
+import pkg from "pg";
 import { env } from "./env.js";
 
-const { Pool } = pg;
+const { Pool } = pkg;
 
 let pool = null;
 
 export function getPool() {
   if (!pool) {
-    if (!env.databaseUrl) {
-      console.warn("[DB] DATABASE_URL não definida");
-      return null;
-    }
-
     pool = new Pool({
       connectionString: env.databaseUrl,
       ssl: { rejectUnauthorized: false },
@@ -20,34 +15,31 @@ export function getPool() {
     pool.on("error", (err) => {
       console.error("[DB ERROR]", err.message);
     });
-
-    console.log("[DB] Pool criado com sucesso");
   }
 
   return pool;
 }
 
-export async function testDbConnection() {
-  try {
-    const db = getPool();
-    if (!db) return { ok: false };
-
-    await db.query("SELECT 1");
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-}
-
-/*
-🔥 ESSA PARTE RESOLVE SEU ERRO
-*/
+// 🔥 QUERY PADRÃO
 export async function query(text, params = []) {
   const db = getPool();
-
-  if (!db) {
-    throw new Error("Banco não configurado");
-  }
-
   return db.query(text, params);
+}
+
+// 🔥 TESTE DE BANCO (PADRÃO GLOBAL)
+export async function testDatabase() {
+  try {
+    const db = getPool();
+    await db.query("SELECT 1");
+
+    return {
+      ok: true,
+      message: "Banco conectado",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message,
+    };
+  }
 }
