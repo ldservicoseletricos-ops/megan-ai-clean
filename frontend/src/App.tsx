@@ -6,11 +6,19 @@ type Message = {
   content: string;
 };
 
+type DeviceLocation = {
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null;
+} | null;
+
 export default function App() {
-  const [status, setStatus] = useState("Verificando...");
+  const [status, setStatus] = useState("Verificando backend...");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [deviceLocation, setDeviceLocation] = useState<DeviceLocation>(null);
+  const [locationStatus, setLocationStatus] = useState("Solicitando localização...");
 
   useEffect(() => {
     async function loadHealth() {
@@ -29,6 +37,33 @@ export default function App() {
     loadHealth();
   }, []);
 
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      setLocationStatus("Geolocalização não suportada no navegador");
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setDeviceLocation({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy,
+        });
+        setLocationStatus("Localização ativa");
+      },
+      () => {
+        setDeviceLocation(null);
+        setLocationStatus("Localização não permitida");
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 300000,
+      }
+    );
+  }, []);
+
   async function handleSend() {
     const trimmed = input.trim();
     if (!trimmed || loading) return;
@@ -43,13 +78,17 @@ export default function App() {
     setLoading(true);
 
     try {
-      const result = await sendChatMessage(trimmed);
+      const result = await sendChatMessage(trimmed, deviceLocation);
+
+      const weather = result?.meta?.weather;
+      const weatherText =
+        weather && weather.temperature !== null
+          ? `\n\n🌤️ Clima atual: ${weather.weatherText}, ${weather.temperature}°C`
+          : "";
 
       const assistantReply =
-        result?.reply ||
-        result?.response ||
-        result?.message ||
-        "Recebi sua mensagem, mas não veio resposta do backend.";
+        (result?.reply || result?.response || result?.message || "Sem resposta da Megan.") +
+        weatherText;
 
       const assistantMessage: Message = {
         role: "assistant",
@@ -57,10 +96,12 @@ export default function App() {
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
-    } catch {
+    } catch (error: any) {
       const assistantMessage: Message = {
         role: "assistant",
-        content: "Erro ao conectar com o backend da Megan OS.",
+        content:
+          error?.response?.data?.error ||
+          "Erro ao conectar com o backend da Megan OS.",
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -80,7 +121,8 @@ export default function App() {
         }}
       >
         <h2 style={{ marginTop: 0 }}>Megan OS</h2>
-        <p style={{ color: "#94a3b8" }}>{status}</p>
+        <p style={{ color: "#94a3b8", marginBottom: 8 }}>{status}</p>
+        <p style={{ color: "#94a3b8", marginTop: 0 }}>{locationStatus}</p>
       </aside>
 
       <main style={{ flex: 1, display: "flex", flexDirection: "column" }}>
@@ -92,7 +134,7 @@ export default function App() {
         >
           <h1 style={{ margin: 0 }}>Megan OS</h1>
           <p style={{ margin: "8px 0 0", color: "#94a3b8" }}>
-            Resposta em tempo real com sessões persistidas
+            Humana, contextual, com clima real e localização ativa
           </p>
         </header>
 
@@ -113,7 +155,7 @@ export default function App() {
               }}
             >
               <h3>Bem-vindo à Megan OS</h3>
-              <p>Seu backend já está online. Agora você pode testar o chat.</p>
+              <p>Agora a Megan pode usar sua localização e clima real na conversa.</p>
             </div>
           ) : (
             messages.map((message, index) => (

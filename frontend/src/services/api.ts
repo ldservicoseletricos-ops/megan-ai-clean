@@ -13,20 +13,22 @@ export const api = axios.create({
   },
 });
 
-/* =========================
-   HEALTH CHECK
-========================= */
 export async function checkHealth() {
   const { data } = await api.get("/api/health");
   return data;
 }
 
-/* =========================
-   CHAT
-========================= */
-export async function sendChatMessage(message: string) {
+export async function sendChatMessage(
+  message: string,
+  deviceLocation: {
+    latitude: number;
+    longitude: number;
+    accuracy?: number | null;
+  } | null
+) {
   const { data } = await api.post("/api/chat", {
     message,
+    deviceLocation,
   });
 
   return data;
