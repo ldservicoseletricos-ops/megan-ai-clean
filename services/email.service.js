@@ -1,207 +1,109 @@
-import crypto from "crypto";
 import nodemailer from "nodemailer";
+import crypto from "crypto";
 import { env } from "../config/env.js";
 
-function normalizeBaseUrl(url) {
-  return String(url || "").trim().replace(/\/+$/, "");
-}
-
-function getAppBaseUrl() {
-  const frontendUrl =
-    normalizeBaseUrl(env.frontendUrl) ||
-    normalizeBaseUrl(process.env.FRONTEND_URL);
-
-  if (frontendUrl) {
-    return frontendUrl;
-  }
-
-  return "http://localhost:5173";
-}
-
-function getVerificationUrl(token) {
-  const baseUrl = getAppBaseUrl();
-  return `${baseUrl}/verify-email?token=${encodeURIComponent(token)}`;
-}
-
 function hasSmtpConfig() {
-  const host = String(env.smtpHost || process.env.SMTP_HOST || "").trim();
-  const port = String(env.smtpPort || process.env.SMTP_PORT || "").trim();
-  const user = String(env.smtpUser || process.env.SMTP_USER || "").trim();
-  const pass = String(env.smtpPass || process.env.SMTP_PASS || "").trim();
-
-  return Boolean(host && port && user && pass);
-}
-
-function getTransportConfig() {
-  const host = String(env.smtpHost || process.env.SMTP_HOST || "").trim();
-  const port = Number(env.smtpPort || process.env.SMTP_PORT || 587);
-  const user = String(env.smtpUser || process.env.SMTP_USER || "").trim();
-  const pass = String(env.smtpPass || process.env.SMTP_PASS || "").trim();
-  const secure =
-    String(env.smtpSecure || process.env.SMTP_SECURE || "").trim() === "true" ||
-    port === 465;
-
-  return {
-    host,
-    port,
-    secure,
-    auth: {
-      user,
-      pass,
-    },
-  };
-}
-
-function getFromEmail() {
-  return (
-    String(env.smtpFrom || process.env.SMTP_FROM || "").trim() ||
-    String(env.smtpUser || process.env.SMTP_USER || "").trim() ||
-    "no-reply@megan.local"
+  return Boolean(
+    env.smtpHost &&
+      env.smtpPort &&
+      env.smtpUser &&
+      env.smtpPass &&
+      env.smtpFromEmail &&
+      env.frontendUrl
   );
 }
 
-function buildVerificationEmailHtml({ name, verificationUrl, token }) {
-  const safeName = String(name || "Usuário").trim() || "Usuário";
+function createTransporter() {
+  if (!hasSmtpConfig()) {
+    return null;
+  }
 
-  return `
-    <div style="font-family:Arial,Helvetica,sans-serif; background:#f5f7fb; padding:32px; color:#111827;">
-      <div style="max-width:560px; margin:0 auto; background:#ffffff; border-radius:18px; padding:32px; box-shadow:0 10px 30px rgba(0,0,0,0.08);">
-        <h1 style="margin:0 0 16px; font-size:24px;">Confirmar seu email</h1>
-        <p style="font-size:16px; line-height:1.6; margin:0 0 16px;">
-          Olá, <strong>${safeName}</strong>.
-        </p>
-        <p style="font-size:16px; line-height:1.6; margin:0 0 24px;">
-          Obrigado por criar sua conta na <strong>Megan OS</strong>. Para ativar seu acesso, confirme seu email clicando no botão abaixo:
-        </p>
-
-        <div style="margin:24px 0; text-align:center;">
-          <a
-            href="${verificationUrl}"
-            style="display:inline-block; background:#111827; color:#ffffff; text-decoration:none; padding:14px 22px; border-radius:12px; font-weight:700;"
-          >
-            Confirmar email
-          </a>
-        </div>
-
-        <p style="font-size:14px; color:#4b5563; line-height:1.6; margin:24px 0 8px;">
-          Se o botão não funcionar, copie e cole este link no navegador:
-        </p>
-        <p style="font-size:14px; word-break:break-word; color:#2563eb; margin:0 0 20px;">
-          ${verificationUrl}
-        </p>
-
-        <p style="font-size:13px; color:#6b7280; line-height:1.6; margin:0;">
-          Token de verificação: <strong>${token}</strong>
-        </p>
-
-        <hr style="border:none; border-top:1px solid #e5e7eb; margin:24px 0;" />
-
-        <p style="font-size:12px; color:#6b7280; line-height:1.6; margin:0;">
-          Se você não criou esta conta, ignore este email.
-        </p>
-      </div>
-    </div>
-  `;
+  return nodemailer.createTransport({
+    host: env.smtpHost,
+    port: Number(env.smtpPort),
+    secure: String(env.smtpSecure) === "true" || env.smtpSecure === true,
+    auth: {
+      user: env.smtpUser,
+      pass: env.smtpPass,
+    },
+    connectionTimeout: 8000,
+    greetingTimeout: 8000,
+    socketTimeout: 10000,
+  });
 }
 
-function buildVerificationEmailText({ name, verificationUrl, token }) {
-  const safeName = String(name || "Usuário").trim() || "Usuário";
-
-  return [
-    `Olá, ${safeName}.`,
-    "",
-    "Obrigado por criar sua conta na Megan OS.",
-    "Para ativar seu acesso, confirme seu email no link abaixo:",
-    "",
-    verificationUrl,
-    "",
-    `Token de verificação: ${token}`,
-    "",
-    "Se você não criou esta conta, ignore este email.",
-  ].join("\n");
+function withTimeout(promise, ms = 10000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Tempo limite do SMTP excedido")), ms)
+    ),
+  ]);
 }
-
-let transporterInstance = null;
 
 export function generateVerificationToken() {
   return crypto.randomBytes(32).toString("hex");
 }
 
-export async function getEmailTransporter() {
-  if (!hasSmtpConfig()) {
-    return null;
-  }
-
-  if (transporterInstance) {
-    return transporterInstance;
-  }
-
-  const transporter = nodemailer.createTransport(getTransportConfig());
-  await transporter.verify();
-
-  transporterInstance = transporter;
-  return transporterInstance;
-}
-
 export async function sendVerificationEmail({ to, name, token }) {
-  const recipient = String(to || "").trim().toLowerCase();
-  const verificationToken = String(token || "").trim();
+  const transporter = createTransporter();
 
-  if (!recipient) {
-    throw new Error("Destinatário de email não informado");
-  }
-
-  if (!verificationToken) {
-    throw new Error("Token de verificação não informado");
-  }
-
-  const verificationUrl = getVerificationUrl(verificationToken);
-
-  if (!hasSmtpConfig()) {
-    console.warn("[EMAIL] SMTP não configurado. Envio ignorado.");
-
+  if (!transporter) {
     return {
-      ok: true,
+      ok: false,
       skipped: true,
       message: "SMTP não configurado",
-      verifyUrl: verificationUrl,
-      verifyToken: verificationToken,
     };
   }
 
-  const transporter = await getEmailTransporter();
+  const verifyUrl = `${String(env.frontendUrl).replace(/\/+$/, "")}/?verify=${token}`;
+  const from = `"${env.smtpFromName || "Megan OS"}" <${env.smtpFromEmail}>`;
+  const subject = "Confirme seu email - Megan OS";
 
-  const mailOptions = {
-    from: getFromEmail(),
-    to: recipient,
-    subject: "Confirme seu email - Megan OS",
-    text: buildVerificationEmailText({
-      name,
-      verificationUrl,
-      token: verificationToken,
-    }),
-    html: buildVerificationEmailHtml({
-      name,
-      verificationUrl,
-      token: verificationToken,
-    }),
-  };
+  const html = `
+    <div style="font-family: Arial, Helvetica, sans-serif; background:#0f172a; color:#e5e7eb; padding:32px;">
+      <div style="max-width:600px; margin:0 auto; background:#111827; border:1px solid #1f2937; border-radius:16px; padding:32px;">
+        <div style="font-size:12px; letter-spacing:1px; color:#93c5fd; margin-bottom:12px;">MEGAN OS</div>
+        <h1 style="margin:0 0 16px; font-size:28px; color:#ffffff;">Confirme seu email</h1>
+        <p style="font-size:16px; line-height:1.7; color:#d1d5db;">
+          Olá, <strong>${name || "usuário"}</strong>.
+        </p>
+        <p style="font-size:16px; line-height:1.7; color:#d1d5db;">
+          Para ativar sua conta na Megan OS, confirme seu email clicando no botão abaixo:
+        </p>
+        <div style="margin-top:24px;">
+          <a href="${verifyUrl}" style="display:inline-block; padding:14px 22px; background:#2563eb; color:#ffffff; text-decoration:none; border-radius:10px; font-weight:700;">
+            Confirmar email
+          </a>
+        </div>
+        <p style="margin-top:24px; font-size:13px; color:#9ca3af;">
+          Se o botão não abrir, use este link:
+        </p>
+        <p style="font-size:13px; color:#93c5fd; word-break:break-all;">
+          ${verifyUrl}
+        </p>
+      </div>
+    </div>
+  `;
 
-  const info = await transporter.sendMail(mailOptions);
+  const text = `Olá, ${name || "usuário"}.
+
+Confirme seu email acessando:
+${verifyUrl}`;
+
+  const info = await withTimeout(
+    transporter.sendMail({
+      from,
+      to,
+      subject,
+      text,
+      html,
+    }),
+    10000
+  );
 
   return {
     ok: true,
-    skipped: false,
-    messageId: info.messageId || null,
-    accepted: info.accepted || [],
-    rejected: info.rejected || [],
-    response: info.response || null,
-    verifyUrl: verificationUrl,
+    messageId: info.messageId,
   };
 }
-
-export default {
-  generateVerificationToken,
-  getEmailTransporter,
-  sendVerificationEmail,
-};

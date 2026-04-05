@@ -1,41 +1,21 @@
 import { testDatabase } from "../config/db.js";
+import { env } from "../config/env.js";
 
-export async function getSystemStatus(req, res) {
-  try {
-    const dbStatus = await testDatabase();
+export async function healthCheck(_req, res) {
+  const db = await testDatabase();
 
-    return res.status(200).json({
-      ok: true,
-      app: "Megan OS Backend",
-      status: "online",
-      environment: process.env.NODE_ENV || "development",
-      port: process.env.PORT || 10000,
-      database: dbStatus,
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    console.error("[SYSTEM] Erro ao obter status do sistema:", error.message);
-
-    return res.status(500).json({
-      ok: false,
-      message: "Erro ao obter status do sistema",
-      error: error.message,
-    });
-  }
-}
-
-export async function healthCheck(req, res) {
-  try {
-    return res.status(200).json({
-      ok: true,
-      message: "Megan OS Backend online",
-      timestamp: new Date().toISOString(),
-    });
-  } catch (error) {
-    return res.status(500).json({
-      ok: false,
-      message: "Erro no health check",
-      error: error.message,
-    });
-  }
+  res.json({
+    ok: true,
+    app: "Megan OS Backend",
+    env: env.nodeEnv,
+    port: env.port,
+    database: db.ok,
+    databaseInfo: db,
+    ai: {
+      openai: Boolean(env.openAiApiKey),
+      gemini: Boolean(env.geminiApiKey),
+      mock: env.allowMockAi,
+    },
+    time: new Date().toISOString(),
+  });
 }

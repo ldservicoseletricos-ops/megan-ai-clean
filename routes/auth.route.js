@@ -1,40 +1,21 @@
-import { Router } from "express";
+import express from "express";
 import {
-  googleLogin,
-  registerUser,
-  loginUser,
-  getMe,
+  googleCallbackController,
+  googleStartController,
+  loginController,
+  meController,
+  registerController,
 } from "../controllers/auth.controller.js";
-
 import { requireAuth } from "../middleware/requireAuth.js";
 
-const router = Router();
+const router = express.Router();
 
-/*
-  =========================
-  AUTH PÚBLICO
-  =========================
-*/
+router.post("/register", registerController);
+router.post("/login", loginController);
+router.get("/me", requireAuth, meController);
 
-// cadastro
-router.post("/register", registerUser);
+router.get("/google/start", googleStartController);
+router.get("/google/callback", googleCallbackController);
 
-// login com email/senha
-router.post("/login", loginUser);
-
-// login com Google
-router.post("/google", googleLogin);
-
-// callback Google (OAuth)
-router.get("/google/callback", googleLogin);
-
-/*
-  =========================
-  AUTH PRIVADO
-  =========================
-*/
-
-// dados do usuário logado
-router.get("/me", requireAuth, getMe);
-
+export { router as authRouter };
 export default router;
