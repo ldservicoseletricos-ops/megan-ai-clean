@@ -1,185 +1,135 @@
-import { OAuth2Client } from "google-auth-library";
-import {
-  normalizeEmail,
-  normalizeName,
-  sanitizeUser,
-  signToken,
-  verifyJwtToken,
-  findUserByEmail,
-  findUserByGoogleId,
-  createPendingUser,
-  createGoogleUser,
-  linkGoogleToExistingUser,
-  findUserByVerificationToken,
-  markUserEmailVerified,
-  findUserAuthByEmail,
-  findUserProfileById,
-  comparePassword,
-} from "../services/auth.service.js";
-import {
-  generateVerificationToken,
-  sendVerificationEmail,
-} from "../services/email.service.js";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import { google } from "googleapis";
 import { env } from "../config/env.js";
 import { getPool } from "../config/db.js";
-import { logError, logWarn } from "../utils/logger.js";
 
-const googleClient = env.googleClientId
-  ? new OAuth2Client(env.googleClientId)
-  : null;
+const db = getPool();
 
-function getBearerToken(req) {
-  const authHeader = String(req.headers.authorization || "");
-  const [scheme, token] = authHeader.split(" ");
-
-  if (scheme !== "Bearer" || !token) {
-    return null;
-  }
-
-  return token;
-}
-
-function getCallbackUrl() {
-  return (
-    env.googleCallbackUrl ||
-    "https://megan-ai.onrender.com/api/auth/google/callback"
-  );
-}
-
-async function updateVerificationToken(userId, token) {
-  const db = getPool();
-
+async function query(text, params = []) {
   if (!db) {
-    throw new Error("Banco de dados não configurado");
+    throw new Error("Banco não configurado");
   }
 
-  await db.query(
-    `
-      UPDATE app_users
-      SET
-        verification_token = $1,
-        verification_expires_at = NOW() + interval '1 day'
-      WHERE id = $2
-    `,
-    [token, userId]
+  return db.query(text, params);
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeText(value) {
+  return String(value || "").trim();
+}
+
+function buildJwt(user) {
+  return jwt.sign(
+    {
+      sub: user.id,
+      email: user.email,
+    },
+    env.jwtSecret || process.env.JWT_SECRET || "super_secret_key",
+    {
+      expiresIn: env.jwtExpiresIn || process.env.JWT_EXPIRES_IN || "7d",
+    }
   );
 }
 
-async function finishGoogleLogin(payload, res) {
-  const googleId = String(payload?.sub || "").trim();
-  const email = normalizeEmail(payload?.email);
-  const name = normalizeName(payload?.name || "Google User");
-
-  if (!googleId || !email) {
-    return res.status(400).json({
-      ok: false,
-      error: "Dados do Google inválidos",
-    });
-  }
-
-  let user = await findUserByGoogleId(googleId);
-
-  if (!user) {
-    const existingUser = await findUserByEmail(email);
-
-    if (existingUser) {
-      user = await linkGoogleToExistingUser({
-        userId: existingUser.id,
-        googleId,
-      });
-    } else {
-      user = await createGoogleUser({
-        googleId,
-        email,
-        name,
-      });
-    }
-  }
-
-  const token = signToken(user);
-
-  return res.json({
-    ok: true,
-    token,
-    user: sanitizeUser(user),
-    message: "Login com Google realizado com sucesso.",
-  });
+function buildSafeUser(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    provider: row.provider,
+    emailVerified: row.email_verified,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
 }
 
-/* =========================
-   REGISTER
-========================= */
-export async function register(req, res) {
-  try {
-    const name = normalizeName(req.body?.name);
-    const email = normalizeEmail(req.body?.email);
-    const password = String(req.body?.password || "").trim();
+function buildGoogleClient() {
+  const clientId = env.googleClientId || process.env.GOOGLE_CLIENT_ID;
+  const clientSecret =
+    env.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET;
+  const callbackUrl =
+    env.googleCallbackUrl || process.env.GOOGLE_CALLBACK_URL;
 
-    if (!name || !email || !password) {
+  return new google.auth.OAuth2(clientId, clientSecret, callbackUrl);
+}
+
+export async function registerUser(req, res) {
+  try {
+    const name = normalizeText(req.body?.name);
+    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || "");
+
+    if (!name) {
       return res.status(400).json({
         ok: false,
-        error: "Nome, email e senha são obrigatórios",
+        error: "Nome é obrigatório",
+      });
+    }
+
+    if (!email) {
+      return res.status(400).json({
+        ok: false,
+        error: "Email é obrigatório",
       });
     }
 
     if (password.length < 6) {
       return res.status(400).json({
         ok: false,
-        error: "A senha precisa ter pelo menos 6 caracteres",
+        error: "A senha deve ter pelo menos 6 caracteres",
       });
     }
 
-    const existingUser = await findUserByEmail(email);
+    const existing = await query(
+      `
+      SELECT id
+      FROM users
+      WHERE email = $1
+      LIMIT 1
+      `,
+      [email]
+    );
 
-    if (existingUser) {
+    if (existing.rows[0]) {
       return res.status(409).json({
         ok: false,
-        error: "Este email já está cadastrado",
+        error: "Já existe uma conta com este email",
       });
     }
 
-    const verificationToken = generateVerificationToken();
-    const verificationExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const passwordHash = await bcrypt.hash(password, 10);
 
-    const createdUser = await createPendingUser({
-      name,
-      email,
-      password,
-      verificationToken,
-      verificationExpiresAt,
-    });
+    const result = await query(
+      `
+      INSERT INTO users (
+        name,
+        email,
+        password_hash,
+        provider,
+        email_verified
+      )
+      VALUES ($1, $2, $3, 'local', false)
+      RETURNING id, name, email, provider, email_verified, created_at, updated_at
+      `,
+      [name, email, passwordHash]
+    );
 
-    const emailResult = await sendVerificationEmail({
-      to: email,
-      name,
-      token: verificationToken,
-    });
+    const user = buildSafeUser(result.rows[0]);
+    const token = buildJwt(user);
 
-    const smtpSkipped = Boolean(emailResult?.skipped);
-
-    if (smtpSkipped) {
-      logWarn("SMTP não configurado. Usuário criado sem envio de email.", email);
-
-      await markUserEmailVerified(createdUser.id);
-
-      const verifiedUser = await findUserProfileById(createdUser.id);
-      const token = signToken(verifiedUser);
-
-      return res.status(201).json({
-        ok: true,
-        token,
-        user: sanitizeUser(verifiedUser),
-        message: "Conta criada com sucesso.",
-      });
-    }
-
-    return res.status(201).json({
+    return res.json({
       ok: true,
-      user: sanitizeUser(createdUser),
-      message: "Conta criada. Verifique seu email para entrar.",
+      token,
+      user,
+      message: "Conta criada com sucesso",
     });
   } catch (error) {
-    logError("Erro register", error);
+    console.error("[AUTH REGISTER ERROR]", error?.message || error);
+
     return res.status(500).json({
       ok: false,
       error: "Erro ao criar conta",
@@ -187,353 +137,222 @@ export async function register(req, res) {
   }
 }
 
-/* =========================
-   LOGIN
-========================= */
-export async function login(req, res) {
+export async function loginUser(req, res) {
   try {
     const email = normalizeEmail(req.body?.email);
-    const password = String(req.body?.password || "").trim();
-
-    if (!email || !password) {
-      return res.status(400).json({
-        ok: false,
-        error: "Email e senha são obrigatórios",
-      });
-    }
-
-    const user = await findUserAuthByEmail(email);
-
-    if (!user) {
-      return res.status(401).json({
-        ok: false,
-        error: "Email ou senha inválidos",
-      });
-    }
-
-    const passwordOk = await comparePassword(password, user.password_hash);
-
-    if (!passwordOk) {
-      return res.status(401).json({
-        ok: false,
-        error: "Email ou senha inválidos",
-      });
-    }
-
-    if (!user.email_verified) {
-      return res.status(403).json({
-        ok: false,
-        error: "Confirme seu email antes de entrar",
-      });
-    }
-
-    const token = signToken(user);
-
-    return res.json({
-      ok: true,
-      token,
-      user: sanitizeUser(user),
-      message: "Login realizado com sucesso.",
-    });
-  } catch (error) {
-    logError("Erro login", error);
-    return res.status(500).json({
-      ok: false,
-      error: "Erro no login",
-    });
-  }
-}
-
-/* =========================
-   GOOGLE LOGIN
-========================= */
-export async function googleLogin(req, res) {
-  try {
-    if (!env.googleClientId) {
-      return res.status(500).json({
-        ok: false,
-        error: "GOOGLE_CLIENT_ID não configurado",
-      });
-    }
-
-    if (req.method === "GET" && req.query?.code) {
-      const code = String(req.query.code || "").trim();
-
-      const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          code,
-          client_id: env.googleClientId,
-          client_secret: env.googleClientSecret,
-          redirect_uri: getCallbackUrl(),
-          grant_type: "authorization_code",
-        }),
-      });
-
-      const tokenData = await tokenRes.json();
-
-      if (!tokenRes.ok) {
-        logError("Erro Google token", tokenData);
-
-        return res.status(400).json({
-          ok: false,
-          error: "Falha ao obter token do Google",
-        });
-      }
-
-      const userRes = await fetch(
-        "https://www.googleapis.com/oauth2/v2/userinfo",
-        {
-          headers: {
-            Authorization: `Bearer ${tokenData.access_token}`,
-          },
-        }
-      );
-
-      const userData = await userRes.json();
-
-      if (!userRes.ok) {
-        logError("Erro Google userinfo", userData);
-
-        return res.status(400).json({
-          ok: false,
-          error: "Falha ao obter dados do usuário Google",
-        });
-      }
-
-      return await finishGoogleLogin(userData, res);
-    }
-
-    const credential = String(req.body?.credential || "").trim();
-
-    if (!credential) {
-      return res.status(400).json({
-        ok: false,
-        error: "Credential do Google ausente",
-      });
-    }
-
-    if (!googleClient) {
-      return res.status(500).json({
-        ok: false,
-        error: "Cliente Google não configurado",
-      });
-    }
-
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: env.googleClientId,
-    });
-
-    const payload = ticket.getPayload();
-
-    return await finishGoogleLogin(payload, res);
-  } catch (error) {
-    logError("Erro Google", error);
-
-    return res.status(500).json({
-      ok: false,
-      error: "Erro no login com Google",
-    });
-  }
-}
-
-/* =========================
-   VERIFY EMAIL
-========================= */
-export async function verifyEmail(req, res) {
-  try {
-    const token = String(req.body?.token || req.query?.token || "").trim();
-
-    if (!token) {
-      return res.status(400).json({
-        ok: false,
-        error: "Token obrigatório",
-      });
-    }
-
-    const user = await findUserByVerificationToken(token);
-
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        error: "Token inválido ou expirado",
-      });
-    }
-
-    if (user.verification_expires_at && new Date(user.verification_expires_at) < new Date()) {
-      return res.status(400).json({
-        ok: false,
-        error: "Token expirado",
-      });
-    }
-
-    await markUserEmailVerified(user.id);
-
-    const verifiedUser = await findUserProfileById(user.id);
-
-    return res.json({
-      ok: true,
-      message: "Email confirmado com sucesso",
-      user: sanitizeUser(verifiedUser),
-    });
-  } catch (error) {
-    logError("Erro verifyEmail", error);
-
-    return res.status(500).json({
-      ok: false,
-      error: "Erro ao confirmar email",
-    });
-  }
-}
-
-/* =========================
-   RESEND VERIFICATION
-========================= */
-export async function resendVerification(req, res) {
-  try {
-    const email = normalizeEmail(req.body?.email);
+    const password = String(req.body?.password || "");
 
     if (!email) {
       return res.status(400).json({
         ok: false,
-        error: "Email obrigatório",
+        error: "Email é obrigatório",
       });
     }
 
-    const user = await findUserByEmail(email);
-
-    if (!user) {
-      return res.status(404).json({
+    if (!password) {
+      return res.status(400).json({
         ok: false,
-        error: "Usuário não encontrado",
+        error: "Senha é obrigatória",
       });
     }
 
-    if (user.email_verified) {
-      return res.json({
-        ok: true,
-        message: "Email já confirmado",
+    const result = await query(
+      `
+      SELECT id, name, email, password_hash, provider, email_verified, created_at, updated_at
+      FROM users
+      WHERE email = $1
+      LIMIT 1
+      `,
+      [email]
+    );
+
+    const userRow = result.rows[0];
+
+    if (!userRow) {
+      return res.status(401).json({
+        ok: false,
+        error: "Email ou senha inválidos",
       });
     }
 
-    const token = generateVerificationToken();
+    if (!userRow.password_hash) {
+      return res.status(400).json({
+        ok: false,
+        error: "Esta conta usa login com Google",
+      });
+    }
 
-    await updateVerificationToken(user.id, token);
+    const validPassword = await bcrypt.compare(password, userRow.password_hash);
 
-    const emailResult = await sendVerificationEmail({
-      to: user.email,
-      name: user.name,
-      token,
-    });
+    if (!validPassword) {
+      return res.status(401).json({
+        ok: false,
+        error: "Email ou senha inválidos",
+      });
+    }
+
+    const user = buildSafeUser(userRow);
+    const token = buildJwt(user);
 
     return res.json({
       ok: true,
-      message: emailResult?.skipped
-        ? "SMTP não configurado. Use o token manual para confirmar."
-        : "Email de verificação reenviado",
-      verifyToken: emailResult?.skipped ? token : undefined,
+      token,
+      user,
+      message: "Login realizado com sucesso",
     });
   } catch (error) {
-    logError("Erro resendVerification", error);
+    console.error("[AUTH LOGIN ERROR]", error?.message || error);
 
     return res.status(500).json({
       ok: false,
-      error: "Erro ao reenviar verificação",
+      error: "Erro ao fazer login",
     });
   }
 }
 
-/* =========================
-   FORGOT PASSWORD
-========================= */
-export async function forgotPassword(_req, res) {
-  return res.status(501).json({
-    ok: false,
-    error: "Forgot password ainda não implementado",
+export async function getMe(req, res) {
+  return res.json({
+    ok: true,
+    user: req.user,
   });
 }
 
-/* =========================
-   RESET PASSWORD
-========================= */
-export async function resetPassword(_req, res) {
-  return res.status(501).json({
-    ok: false,
-    error: "Reset password ainda não implementado",
-  });
-}
-
-/* =========================
-   MAGIC LINK
-========================= */
-export async function magicLinkLogin(_req, res) {
-  return res.status(501).json({
-    ok: false,
-    error: "Magic link ainda não implementado",
-  });
-}
-
-export async function magicLinkVerify(_req, res) {
-  return res.status(501).json({
-    ok: false,
-    error: "Magic link verify ainda não implementado",
-  });
-}
-
-/* =========================
-   ME
-========================= */
-export async function me(req, res) {
+async function googleStart(req, res) {
   try {
-    const token = getBearerToken(req);
+    const clientId = env.googleClientId || process.env.GOOGLE_CLIENT_ID;
+    const clientSecret =
+      env.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET;
+    const callbackUrl =
+      env.googleCallbackUrl || process.env.GOOGLE_CALLBACK_URL;
 
-    if (!token) {
-      return res.status(401).json({
+    if (!clientId || !clientSecret || !callbackUrl) {
+      return res.status(500).json({
         ok: false,
-        error: "Não autorizado",
+        error: "Google OAuth não configurado no backend",
       });
     }
 
-    const decoded = verifyJwtToken(token);
-    const userId = decoded?.sub || decoded?.id;
+    const client = buildGoogleClient();
 
-    if (!userId) {
-      return res.status(401).json({
-        ok: false,
-        error: "Token inválido",
-      });
-    }
-
-    const user = await findUserProfileById(userId);
-
-    if (!user) {
-      return res.status(404).json({
-        ok: false,
-        error: "Usuário não encontrado",
-      });
-    }
-
-    return res.json({
-      ok: true,
-      user: sanitizeUser(user),
+    const url = client.generateAuthUrl({
+      access_type: "offline",
+      prompt: "consent",
+      scope: ["openid", "email", "profile"],
     });
-  } catch (error) {
-    logError("Erro me", error);
 
-    return res.status(401).json({
+    return res.redirect(url);
+  } catch (error) {
+    console.error("[AUTH GOOGLE START ERROR]", error?.message || error);
+
+    return res.status(500).json({
       ok: false,
-      error: "Token inválido ou expirado",
+      error: "Erro ao iniciar login com Google",
     });
   }
 }
 
-/* =========================
-   ALIASES DE COMPATIBILIDADE
-========================= */
-export const registerUser = register;
-export const loginUser = login;
-export const getMe = me;
+async function googleCallback(req, res) {
+  try {
+    const code = String(req.query?.code || "");
+
+    if (!code) {
+      return res.status(400).send("Código do Google ausente");
+    }
+
+    const client = buildGoogleClient();
+    const { tokens } = await client.getToken(code);
+
+    client.setCredentials(tokens);
+
+    const oauth2 = google.oauth2({
+      auth: client,
+      version: "v2",
+    });
+
+    const { data } = await oauth2.userinfo.get();
+
+    const googleId = String(data.id || "");
+    const email = normalizeEmail(data.email);
+    const name = normalizeText(data.name || "Usuário Google");
+    const emailVerified = Boolean(data.verified_email);
+
+    if (!googleId || !email) {
+      return res.status(400).send("Não foi possível obter dados do Google");
+    }
+
+    const existingByEmail = await query(
+      `
+      SELECT id, name, email, provider, email_verified, created_at, updated_at
+      FROM users
+      WHERE email = $1
+      LIMIT 1
+      `,
+      [email]
+    );
+
+    let userRow = existingByEmail.rows[0];
+
+    if (userRow) {
+      const updated = await query(
+        `
+        UPDATE users
+        SET
+          name = COALESCE(NULLIF($1, ''), name),
+          google_id = $2,
+          provider = 'google',
+          email_verified = $3,
+          updated_at = NOW()
+        WHERE email = $4
+        RETURNING id, name, email, provider, email_verified, created_at, updated_at
+        `,
+        [name, googleId, emailVerified, email]
+      );
+
+      userRow = updated.rows[0];
+    } else {
+      const inserted = await query(
+        `
+        INSERT INTO users (
+          name,
+          email,
+          google_id,
+          provider,
+          email_verified
+        )
+        VALUES ($1, $2, $3, 'google', $4)
+        RETURNING id, name, email, provider, email_verified, created_at, updated_at
+        `,
+        [name, email, googleId, emailVerified]
+      );
+
+      userRow = inserted.rows[0];
+    }
+
+    const user = buildSafeUser(userRow);
+    const token = buildJwt(user);
+
+    const frontendUrl =
+      String(env.frontendUrl || process.env.FRONTEND_URL || "").trim() ||
+      "http://localhost:5173";
+
+    const redirectUrl =
+      `${frontendUrl}?token=${encodeURIComponent(token)}` +
+      `&user=${encodeURIComponent(JSON.stringify(user))}` +
+      `&login=google`;
+
+    return res.redirect(redirectUrl);
+  } catch (error) {
+    console.error("[AUTH GOOGLE CALLBACK ERROR]", error?.message || error);
+    return res.status(500).send("Erro no callback do Google");
+  }
+}
+
+export async function googleLogin(req, res) {
+  const hasCode = String(req.query?.code || "").trim();
+
+  if (hasCode) {
+    return googleCallback(req, res);
+  }
+
+  return googleStart(req, res);
+}

@@ -1,52 +1,54 @@
-import { verifyJwtToken } from "../services/auth.service.js";
+import jwt from "jsonwebtoken";
+import { getPool } from "../config/db.js";
 
-function extractBearerToken(req) {
-  const authHeader = String(req.headers.authorization || "").trim();
+const db = getPool();
 
-  if (!authHeader.startsWith("Bearer ")) {
-    return null;
-  }
-
-  const token = authHeader.slice(7).trim();
-  return token || null;
+async function query(text, params = []) {
+  if (!db) throw new Error("Banco não configurado");
+  return db.query(text, params);
 }
 
 export async function requireAuth(req, res, next) {
   try {
-    const token = extractBearerToken(req);
+    const authHeader = req.headers.authorization || "";
+    const token = authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
 
     if (!token) {
       return res.status(401).json({
         ok: false,
-        error: "Token não fornecido",
+        error: "Token ausente",
       });
     }
 
-    const decoded = verifyJwtToken(token);
-    const userId = decoded?.sub || decoded?.id || null;
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    if (!userId) {
+    const result = await query(
+      `
+      SELECT id, name, email, provider, email_verified, created_at, updated_at
+      FROM users
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [decoded.sub]
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
       return res.status(401).json({
         ok: false,
-        error: "Token inválido",
+        error: "Usuário não encontrado",
       });
     }
 
-    req.auth = decoded;
-    req.user = {
-      id: userId,
-      email: decoded?.email || null,
-      plan: decoded?.plan || "free",
-      role: decoded?.role || "user",
-    };
-
-    return next();
+    req.user = user;
+    next();
   } catch (error) {
     return res.status(401).json({
       ok: false,
-      error: "Token inválido ou expirado",
+      error: "Sessão inválida",
     });
   }
 }
-
-export default requireAuth;
