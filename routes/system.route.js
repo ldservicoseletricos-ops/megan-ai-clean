@@ -1,12 +1,13 @@
-import { Router } from "express";
-import { healthCheck } from "../controllers/system.controller.js";
+import express from "express";
+import {
+  healthCheck,
+  systemStatusController,
+} from "../controllers/system.controller.js";
 
-const router = Router();
+const router = express.Router();
 
-// 🔥 rota principal
-router.get("/", healthCheck);
-
-// 🔥 rota health (mantém também)
 router.get("/health", healthCheck);
+router.get("/status", systemStatusController);
 
+export { router as systemRouter };
 export default router;
