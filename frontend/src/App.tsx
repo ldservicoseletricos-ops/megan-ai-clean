@@ -31,6 +31,12 @@ type QuickAccessItem = {
   name?: string;
 };
 
+type DeviceLocation = {
+  latitude: number;
+  longitude: number;
+  accuracy?: number | null;
+} | null;
+
 function normalizeText(value: string) {
   return String(value || "")
     .toLowerCase()
@@ -42,11 +48,46 @@ function normalizeText(value: string) {
 function looksLikeNavigationInput(value: string) {
   const text = normalizeText(value);
 
-  return (
+  if (text.length < 2) return false;
+
+  const blockedTerms = [
+    "onde estou",
+    "onde eu estou",
+    "qual minha localizacao",
+    "qual minha localização",
+    "minha localizacao",
+    "minha localização",
+    "clima",
+    "tempo",
+    "temperatura",
+    "vai chover",
+    "quem e",
+    "quem é",
+    "o que e",
+    "o que é",
+    "oque e",
+    "oque é",
+  ];
+
+  if (blockedTerms.some((term) => text.includes(normalizeText(term)))) {
+    return false;
+  }
+
+  if (text.includes("?")) return false;
+
+  const explicitNavigation =
     text.startsWith("navegar") ||
     text.startsWith("ir para") ||
     text.startsWith("ir pra") ||
     text.startsWith("rota") ||
+    text.startsWith("abrir mapa para") ||
+    text.startsWith("abrir rota para") ||
+    text.startsWith("me leve para") ||
+    text.startsWith("me leva para") ||
+    text.startsWith("me leve pra") ||
+    text.startsWith("me leva pra");
+
+  const addressLike =
     text.includes("rua ") ||
     text.includes("avenida ") ||
     text.includes("av ") ||
@@ -55,8 +96,19 @@ function looksLikeNavigationInput(value: string) {
     text.includes("travessa ") ||
     text.includes("alameda ") ||
     text.includes("praca ") ||
-    text.includes("praça ")
-  );
+    text.includes("praça ") ||
+    text.includes("shopping ") ||
+    text.includes("mercado ") ||
+    text.includes("centro ") ||
+    text.includes("bairro ") ||
+    text.includes("parque ");
+
+  const placeNameLike =
+    text.split(" ").length <= 8 &&
+    /^[a-z0-9\s\-.,à-ú]+$/i.test(value) &&
+    text.length >= 2;
+
+  return explicitNavigation || addressLike || placeNameLike;
 }
 
 function generateSessionToken() {
@@ -71,19 +123,23 @@ export default function App() {
   const [status, setStatus] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [deviceLocation, setDeviceLocation] = useState<any>(null);
+  const [deviceLocation, setDeviceLocation] = useState<DeviceLocation>(null);
   const [destination, setDestination] = useState<any>(null);
   const [steps, setSteps] = useState<Step[]>([]);
   const [showMap, setShowMap] = useState(false);
 
   const [suggestions, setSuggestions] = useState<NavigationSuggestion[]>([]);
   const [isSuggesting, setIsSuggesting] = useState(false);
+  const [suggestionsEnabled, setSuggestionsEnabled] = useState(false);
+  const [suggestionError, setSuggestionError] = useState("");
 
   const [favorites, setFavorites] = useState<QuickAccessItem[]>([]);
   const [recent, setRecent] = useState<QuickAccessItem[]>([]);
 
   const debounceRef = useRef<number | null>(null);
   const sessionTokenRef = useRef(generateSessionToken());
+  const locationRef = useRef<DeviceLocation>(null);
+  const lastSuggestionQueryRef = useRef("");
 
   useEffect(() => {
     checkHealth().then(() => setStatus("Online"));
@@ -102,6 +158,10 @@ export default function App() {
 
     loadQuickAccess();
   }, []);
+
+  useEffect(() => {
+    locationRef.current = deviceLocation;
+  }, [deviceLocation]);
 
   useEffect(() => {
     if (!navigator.geolocation) {
@@ -132,21 +192,36 @@ export default function App() {
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        const loc = {
+        const nextLoc = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
           accuracy: pos.coords.accuracy ?? null,
         };
 
-        console.log("LOCALIZAÇÃO ATUALIZADA:", loc);
-        setDeviceLocation(loc);
+        setDeviceLocation((prev) => {
+          if (!prev) return nextLoc;
+
+          const sameLat =
+            Math.abs(Number(prev.latitude) - Number(nextLoc.latitude)) < 0.00002;
+          const sameLng =
+            Math.abs(Number(prev.longitude) - Number(nextLoc.longitude)) < 0.00002;
+          const sameAccuracy =
+            Number(prev.accuracy || 0) === Number(nextLoc.accuracy || 0);
+
+          if (sameLat && sameLng && sameAccuracy) {
+            return prev;
+          }
+
+          console.log("LOCALIZAÇÃO ATUALIZADA:", nextLoc);
+          return nextLoc;
+        });
       },
       (error) => {
         console.log("Erro geolocalização:", error);
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 1000,
+        maximumAge: 3000,
         timeout: 10000,
       }
     );
@@ -156,16 +231,23 @@ export default function App() {
 
   useEffect(() => {
     const trimmed = input.trim();
+    const canSuggest = looksLikeNavigationInput(trimmed);
 
     if (debounceRef.current) {
       window.clearTimeout(debounceRef.current);
     }
 
-    if (trimmed.length < 2 || !looksLikeNavigationInput(trimmed)) {
+    if (!canSuggest) {
       setSuggestions([]);
       setIsSuggesting(false);
+      setSuggestionsEnabled(false);
+      setSuggestionError("");
+      lastSuggestionQueryRef.current = "";
       return;
     }
+
+    setSuggestionsEnabled(true);
+    setSuggestionError("");
 
     debounceRef.current = window.setTimeout(async () => {
       try {
@@ -173,25 +255,37 @@ export default function App() {
 
         const res = await suggestNavigation(
           trimmed,
-          deviceLocation,
+          locationRef.current,
           sessionTokenRef.current
         );
 
-        setSuggestions(Array.isArray(res?.suggestions) ? res.suggestions : []);
+        const nextSuggestions = Array.isArray(res?.suggestions)
+          ? res.suggestions
+          : [];
+
+        setSuggestions(nextSuggestions);
+        lastSuggestionQueryRef.current = trimmed;
+
+        if (nextSuggestions.length === 0) {
+          setSuggestionError("Nenhuma sugestão encontrada para esse destino.");
+        } else {
+          setSuggestionError("");
+        }
       } catch (error) {
         console.log("Erro ao buscar sugestões:", error);
         setSuggestions([]);
+        setSuggestionError("Não foi possível carregar as sugestões agora.");
       } finally {
         setIsSuggesting(false);
       }
-    }, 350);
+    }, 300);
 
     return () => {
       if (debounceRef.current) {
         window.clearTimeout(debounceRef.current);
       }
     };
-  }, [input, deviceLocation]);
+  }, [input]);
 
   const iniciarNavegacao = (dest: any) => {
     if (!dest?.name) return;
@@ -216,11 +310,10 @@ export default function App() {
 
     setSuggestions([]);
     setIsSuggesting(false);
+    setSuggestionsEnabled(false);
+    setSuggestionError("");
 
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: trimmed },
-    ]);
+    setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
 
     try {
       const res = await sendChatMessage(trimmed, deviceLocation);
@@ -266,6 +359,8 @@ export default function App() {
   function handleSuggestionSelect(suggestion: NavigationSuggestion) {
     setInput(suggestion.text);
     setSuggestions([]);
+    setSuggestionError("");
+    setSuggestionsEnabled(false);
     handleSend(suggestion.text);
   }
 
@@ -408,8 +503,14 @@ export default function App() {
           ))}
         </div>
 
-        <div style={{ padding: 20, borderTop: "1px solid #444", position: "relative" }}>
-          {(suggestions.length > 0 || isSuggesting) && (
+        <div
+          style={{
+            padding: 20,
+            borderTop: "1px solid #444",
+            position: "relative",
+          }}
+        >
+          {suggestionsEnabled && (suggestions.length > 0 || isSuggesting || suggestionError) && (
             <div
               style={{
                 position: "absolute",
@@ -433,6 +534,18 @@ export default function App() {
                   }}
                 >
                   Buscando sugestões...
+                </div>
+              )}
+
+              {!isSuggesting && suggestionError && suggestions.length === 0 && (
+                <div
+                  style={{
+                    padding: 14,
+                    color: "#cbd5e1",
+                    fontSize: 14,
+                  }}
+                >
+                  {suggestionError}
                 </div>
               )}
 
@@ -465,6 +578,17 @@ export default function App() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onFocus={() => {
+                const trimmed = input.trim();
+                if (looksLikeNavigationInput(trimmed)) {
+                  setSuggestionsEnabled(true);
+                }
+              }}
+              onBlur={() => {
+                window.setTimeout(() => {
+                  setSuggestionsEnabled(false);
+                }, 180);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleSend();
               }}
@@ -521,39 +645,82 @@ export default function App() {
                 color: "#fff",
                 border: "1px solid rgba(255,255,255,0.12)",
                 borderRadius: 12,
-                padding: "10px 14px",
+                padding: "12px 18px",
                 cursor: "pointer",
                 fontWeight: 700,
-                boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
-                backdropFilter: "blur(8px)",
               }}
             >
               Fechar mapa
             </button>
           </div>
 
-          {destination && (
+          <div
+            style={{
+              position: "absolute",
+              top: 20,
+              left: 20,
+              zIndex: 1001,
+              display: "flex",
+              gap: 14,
+              background: "rgba(17,24,39,0.72)",
+              backdropFilter: "blur(10px)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 18,
+              padding: 16,
+              color: "#fff",
+            }}
+          >
             <div
               style={{
-                position: "absolute",
-                top: 16,
-                left: 16,
-                zIndex: 1002,
-                width: 360,
-                maxWidth: "calc(100vw - 32px)",
+                minWidth: 118,
+                background: "rgba(255,255,255,0.04)",
+                padding: 12,
+                borderRadius: 14,
               }}
             >
-              <DrivingMode destination={destination} steps={steps} />
+              <div style={{ fontSize: 14, opacity: 0.75 }}>Velocidade</div>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>0</div>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>km/h</div>
             </div>
-          )}
 
-          <div style={{ width: "100%", height: "100%" }}>
-            <MapView
-              location={deviceLocation}
-              destination={destination}
-              onStepsUpdate={setSteps}
-            />
+            <div
+              style={{
+                minWidth: 118,
+                background: "rgba(255,255,255,0.04)",
+                padding: 12,
+                borderRadius: 14,
+              }}
+            >
+              <div style={{ fontSize: 14, opacity: 0.75 }}>Distância</div>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>
+                {destination ? "--" : "--"}
+              </div>
+            </div>
+
+            <div
+              style={{
+                minWidth: 118,
+                background: "rgba(255,255,255,0.04)",
+                padding: 12,
+                borderRadius: 14,
+              }}
+            >
+              <div style={{ fontSize: 14, opacity: 0.75 }}>Chegada</div>
+              <div style={{ fontSize: 24, fontWeight: 800 }}>--</div>
+            </div>
           </div>
+
+          <MapView
+            location={deviceLocation}
+            destination={destination}
+            onStepsUpdate={setSteps}
+          />
+
+          <DrivingMode
+            location={deviceLocation}
+            destination={destination}
+            steps={steps}
+          />
         </div>
       )}
     </div>
