@@ -1,5 +1,4 @@
-import { useEffect, useState, useRef } from "react";
-import { useDrivingMode } from "../hooks/useDrivingMode";
+import { useEffect, useRef, useState } from "react";
 import { sendLocationToBackend } from "../services/driving.service";
 import { speak } from "../utils/voice";
 
@@ -14,17 +13,24 @@ type Step = {
   end_location: { lat: number; lng: number };
 };
 
+type CurrentLocation = {
+  latitude: number;
+  longitude: number;
+  speed?: number | null;
+  accuracy?: number | null;
+} | null;
+
 type DrivingModeProps = {
   destination?: Destination;
   steps?: Step[];
+  currentLocation?: CurrentLocation;
 };
 
 export default function DrivingMode({
   destination = null,
   steps = [],
+  currentLocation = null,
 }: DrivingModeProps) {
-  const location = useDrivingMode();
-
   const [speed, setSpeed] = useState(0);
   const [eta, setEta] = useState("--");
   const [distance, setDistance] = useState("--");
@@ -35,17 +41,17 @@ export default function DrivingMode({
   const lastRadarWarningRef = useRef(0);
   const lastBackendAlertRef = useRef("");
   const arrivalSpokenRef = useRef(false);
+  const lastBackendSendRef = useRef(0);
 
   useEffect(() => {
-    if (!location) return;
+    if (!currentLocation) return;
 
-    if (location.speed) {
-      const kmh = Math.round(location.speed * 3.6);
+    if (typeof currentLocation.speed === "number" && !Number.isNaN(currentLocation.speed)) {
+      const kmh = Math.max(0, Math.round(currentLocation.speed * 3.6));
       setSpeed(kmh);
 
       const now = Date.now();
 
-      // radar inteligente sem spam
       if (kmh > 80 && now - lastRadarWarningRef.current > 12000) {
         speak("Atenção, reduza a velocidade");
         lastRadarWarningRef.current = now;
@@ -56,11 +62,21 @@ export default function DrivingMode({
     } else {
       setSpeed(0);
     }
+  }, [currentLocation]);
 
-    const interval = setInterval(async () => {
+  useEffect(() => {
+    if (!currentLocation || !destination) return;
+
+    const sendToBackend = async () => {
       try {
+        const now = Date.now();
+        if (now - lastBackendSendRef.current < 3500) return;
+        lastBackendSendRef.current = now;
+
         const response = await sendLocationToBackend({
-          ...location,
+          latitude: currentLocation.latitude,
+          longitude: currentLocation.longitude,
+          speed: currentLocation.speed ?? null,
           destination,
         });
 
@@ -81,13 +97,13 @@ export default function DrivingMode({
       } catch (error) {
         console.error("Erro DrivingMode:", error);
       }
-    }, 4000);
+    };
 
-    return () => clearInterval(interval);
-  }, [location, destination]);
+    sendToBackend();
+  }, [currentLocation, destination]);
 
   useEffect(() => {
-    if (!location || steps.length === 0) return;
+    if (!currentLocation || steps.length === 0) return;
 
     const stepIndex = stepIndexRef.current;
     const step = steps[stepIndex];
@@ -95,35 +111,35 @@ export default function DrivingMode({
     if (!step) return;
 
     const dist = Math.hypot(
-      location.latitude - step.end_location.lat,
-      location.longitude - step.end_location.lng
+      currentLocation.latitude - step.end_location.lat,
+      currentLocation.longitude - step.end_location.lng
     );
 
-    // aviso antecipado em ~200m
     if (dist < 0.002 && warnedStepRef.current !== stepIndex) {
       speak(`Em breve, ${step.instruction}`);
       warnedStepRef.current = stepIndex;
     }
 
-    // instrução no ponto da curva
     if (dist < 0.0003) {
       speak(step.instruction);
       stepIndexRef.current += 1;
       warnedStepRef.current = null;
     }
 
-    // chegada
     if (dist < 0.0001 && !arrivalSpokenRef.current) {
       speak("Você chegou ao destino");
       arrivalSpokenRef.current = true;
     }
-  }, [location, steps]);
+  }, [currentLocation, steps]);
 
   useEffect(() => {
     if (!destination) {
       stepIndexRef.current = 0;
       warnedStepRef.current = null;
       arrivalSpokenRef.current = false;
+      setEta("--");
+      setDistance("--");
+      setAlert(null);
     }
   }, [destination]);
 

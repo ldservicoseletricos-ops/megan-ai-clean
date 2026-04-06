@@ -15,6 +15,7 @@ type MapViewProps = {
   location: {
     latitude: number;
     longitude: number;
+    speed?: number | null;
   } | null;
   destination?: {
     latitude: number;
@@ -95,18 +96,6 @@ function calculateDistanceMeters(
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-function getStepInstructions(route?: google.maps.DirectionsRoute | null) {
-  if (!route?.legs?.length) return [];
-
-  return route.legs[0].steps.map((step) => ({
-    instruction: step.instructions?.replace(/<[^>]+>/g, "") || "Siga em frente",
-    end_location: {
-      lat: step.end_location?.lat() || 0,
-      lng: step.end_location?.lng() || 0,
-    },
-  }));
-}
-
 export default function MapView({
   location,
   destination,
@@ -120,10 +109,9 @@ export default function MapView({
   const destinationMarkerRef = useRef<google.maps.Marker | null>(null);
 
   const initializedRef = useRef(false);
-  const hasCenteredInitialLocationRef = useRef(false);
   const lastRouteOriginRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastRouteDestinationRef = useRef<{ lat: number; lng: number } | null>(null);
-  const lastViewportDestinationRef = useRef<string | null>(null);
+  const routeFittedRef = useRef(false);
 
   const [mapReady, setMapReady] = useState(false);
   const [loadingMap, setLoadingMap] = useState(true);
@@ -159,7 +147,7 @@ export default function MapView({
 
         const map = new google.maps.Map(mapRef.current, {
           center,
-          zoom: 17,
+          zoom: 18,
           tilt: 0,
           disableDefaultUI: false,
           mapTypeControl: false,
@@ -192,7 +180,6 @@ export default function MapView({
         });
 
         initializedRef.current = true;
-        hasCenteredInitialLocationRef.current = true;
         setMapReady(true);
         setLoadingMap(false);
 
@@ -230,29 +217,27 @@ export default function MapView({
       originMarkerRef.current.setPosition(current);
     }
 
-    if (!hasCenteredInitialLocationRef.current) {
+    if (destination) {
+      mapObj.current.panTo(current);
+
+      const currentZoom = mapObj.current.getZoom() ?? 18;
+      if (currentZoom < 17) {
+        mapObj.current.setZoom(17);
+      }
+    } else if (!initializedRef.current) {
       mapObj.current.setCenter(current);
-      hasCenteredInitialLocationRef.current = true;
     }
-  }, [location]);
+  }, [location, destination]);
 
   useEffect(() => {
-    if (!mapReady || !window.google || !mapObj.current || !directionsRenderer.current) {
-      return;
-    }
-
-    if (!location || !destination) {
-      directionsRenderer.current.set("directions", null);
-
-      if (destinationMarkerRef.current) {
-        destinationMarkerRef.current.setMap(null);
-        destinationMarkerRef.current = null;
-      }
-
-      lastRouteOriginRef.current = null;
-      lastRouteDestinationRef.current = null;
-      lastViewportDestinationRef.current = null;
-      onStepsUpdate?.([]);
+    if (
+      !mapReady ||
+      !location ||
+      !destination ||
+      !window.google ||
+      !mapObj.current ||
+      !directionsRenderer.current
+    ) {
       return;
     }
 
@@ -278,7 +263,7 @@ export default function MapView({
         )
       : Number.MAX_SAFE_INTEGER;
 
-    const destinationMoved = previousDestination
+    const movedDestination = previousDestination
       ? calculateDistanceMeters(
           previousDestination.lat,
           previousDestination.lng,
@@ -287,7 +272,7 @@ export default function MapView({
         )
       : Number.MAX_SAFE_INTEGER;
 
-    if (movedFromLastOrigin < 35 && destinationMoved < 5) {
+    if (movedFromLastOrigin < 20 && movedDestination < 5) {
       return;
     }
 
@@ -339,44 +324,78 @@ export default function MapView({
         directionsRenderer.current?.setRouteIndex(bestRouteIndex);
 
         const bestRoute = result.routes[bestRouteIndex];
-        onStepsUpdate?.(getStepInstructions(bestRoute));
+        const bestLeg = bestRoute?.legs?.[0];
+
+        if (!bestLeg) return;
+
+        const destinationPosition = {
+          lat: destination.latitude,
+          lng: destination.longitude,
+        };
 
         if (!destinationMarkerRef.current) {
           destinationMarkerRef.current = new google.maps.Marker({
-            position: currentDestination,
+            position: destinationPosition,
             map: mapObj.current,
             title: destination.name || "Destino",
           });
         } else {
-          destinationMarkerRef.current.setPosition(currentDestination);
-          destinationMarkerRef.current.setTitle(destination.name || "Destino");
+          destinationMarkerRef.current.setPosition(destinationPosition);
           destinationMarkerRef.current.setMap(mapObj.current);
         }
 
-        const destinationKey = `${currentDestination.lat}:${currentDestination.lng}`;
-        if (lastViewportDestinationRef.current !== destinationKey && bestRoute.bounds) {
-          mapObj.current?.fitBounds(bestRoute.bounds, 80);
-          lastViewportDestinationRef.current = destinationKey;
+        if (!routeFittedRef.current && bestRoute.bounds) {
+          mapObj.current.fitBounds(bestRoute.bounds, 80);
+          routeFittedRef.current = true;
+        }
+
+        const steps: Step[] = bestLeg.steps.map((step) => ({
+          instruction: step.instructions.replace(/<[^>]+>/g, ""),
+          end_location: {
+            lat: step.end_location.lat(),
+            lng: step.end_location.lng(),
+          },
+        }));
+
+        if (onStepsUpdate) {
+          onStepsUpdate(steps);
         }
       }
     );
   }, [mapReady, location, destination, onStepsUpdate]);
 
+  useEffect(() => {
+    if (!destination) {
+      routeFittedRef.current = false;
+      lastRouteOriginRef.current = null;
+      lastRouteDestinationRef.current = null;
+
+      if (directionsRenderer.current) {
+        directionsRenderer.current.set("directions", null);
+      }
+
+      if (destinationMarkerRef.current) {
+        destinationMarkerRef.current.setMap(null);
+        destinationMarkerRef.current = null;
+      }
+    }
+  }, [destination]);
+
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
-      <div ref={mapRef} style={{ width: "100%", height: "100%" }} />
-
       {loadingMap && (
         <div
           style={{
             position: "absolute",
             inset: 0,
+            zIndex: 2,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             background: "#111827",
             color: "#fff",
-            zIndex: 2,
+            fontSize: 16,
+            fontWeight: 700,
           }}
         >
           Carregando mapa...
@@ -390,17 +409,48 @@ export default function MapView({
             left: 16,
             right: 16,
             bottom: 16,
-            background: "rgba(127,29,29,0.92)",
-            color: "#fff",
-            padding: "12px 14px",
-            borderRadius: 12,
             zIndex: 3,
-            boxShadow: "0 8px 20px rgba(0,0,0,0.25)",
+            background: "rgba(127,29,29,0.95)",
+            color: "#fff",
+            padding: 14,
+            borderRadius: 12,
+            textAlign: "center",
+            fontSize: 14,
+            fontWeight: 700,
+            lineHeight: 1.5,
           }}
         >
           {errorMessage}
         </div>
       )}
+
+      {!GOOGLE_MAPS_API_KEY && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 4,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#111827",
+            color: "#fff",
+            padding: 24,
+            textAlign: "center",
+            fontWeight: 700,
+          }}
+        >
+          Configure VITE_GOOGLE_MAPS_API_KEY no frontend para usar o Google Maps.
+        </div>
+      )}
+
+      <div
+        ref={mapRef}
+        style={{
+          width: "100%",
+          height: "100%",
+        }}
+      />
     </div>
   );
 }

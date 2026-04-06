@@ -29,21 +29,20 @@ type QuickAccessItem = {
   label?: string;
   address?: string;
   name?: string;
-  latitude?: number;
-  longitude?: number;
 };
 
 type DeviceLocation = {
   latitude: number;
   longitude: number;
   accuracy?: number | null;
+  speed?: number | null;
 };
 
 type Destination = {
   latitude: number;
   longitude: number;
   name?: string;
-};
+} | null;
 
 function normalizeText(value: string) {
   return String(value || "")
@@ -61,8 +60,6 @@ function looksLikeNavigationInput(value: string) {
     text.startsWith("ir para") ||
     text.startsWith("ir pra") ||
     text.startsWith("rota") ||
-    text.startsWith("me leve") ||
-    text.startsWith("me leva") ||
     text.includes("rua ") ||
     text.includes("avenida ") ||
     text.includes("av ") ||
@@ -102,34 +99,12 @@ function calculateDistanceMeters(
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-function shouldAcceptLocationUpdate(
-  previous: DeviceLocation | null,
-  next: DeviceLocation
-) {
-  if (!previous) return true;
-
-  const distance = calculateDistanceMeters(
-    previous.latitude,
-    previous.longitude,
-    next.latitude,
-    next.longitude
-  );
-
-  const previousAccuracy = previous.accuracy ?? Number.MAX_SAFE_INTEGER;
-  const nextAccuracy = next.accuracy ?? Number.MAX_SAFE_INTEGER;
-
-  if (distance >= 12) return true;
-  if (nextAccuracy + 8 < previousAccuracy) return true;
-
-  return false;
-}
-
 export default function App() {
   const [status, setStatus] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [deviceLocation, setDeviceLocation] = useState<DeviceLocation | null>(null);
-  const [destination, setDestination] = useState<Destination | null>(null);
+  const [destination, setDestination] = useState<Destination>(null);
   const [steps, setSteps] = useState<Step[]>([]);
   const [showMap, setShowMap] = useState(false);
 
@@ -142,12 +117,9 @@ export default function App() {
   const debounceRef = useRef<number | null>(null);
   const sessionTokenRef = useRef(generateSessionToken());
   const lastAcceptedLocationRef = useRef<DeviceLocation | null>(null);
-  const lastLocationUpdateAtRef = useRef(0);
 
   useEffect(() => {
-    checkHealth()
-      .then(() => setStatus("Online"))
-      .catch(() => setStatus("Offline"));
+    checkHealth().then(() => setStatus("Online")).catch(() => setStatus("Offline"));
   }, []);
 
   useEffect(() => {
@@ -170,62 +142,72 @@ export default function App() {
       return;
     }
 
-    function applyLocation(loc: DeviceLocation, force = false) {
-      const now = Date.now();
-      const tooSoon = now - lastLocationUpdateAtRef.current < 1500;
+    const acceptLocation = (nextLoc: DeviceLocation) => {
+      const previous = lastAcceptedLocationRef.current;
 
-      if (!force && tooSoon && !shouldAcceptLocationUpdate(lastAcceptedLocationRef.current, loc)) {
+      if (!previous) {
+        lastAcceptedLocationRef.current = nextLoc;
+        setDeviceLocation(nextLoc);
         return;
       }
 
-      if (!force && !shouldAcceptLocationUpdate(lastAcceptedLocationRef.current, loc)) {
-        return;
-      }
+      const moved = calculateDistanceMeters(
+        previous.latitude,
+        previous.longitude,
+        nextLoc.latitude,
+        nextLoc.longitude
+      );
 
-      lastAcceptedLocationRef.current = loc;
-      lastLocationUpdateAtRef.current = now;
-      setDeviceLocation(loc);
-    }
+      const prevAccuracy = previous.accuracy ?? 9999;
+      const nextAccuracy = nextLoc.accuracy ?? 9999;
+
+      if (moved >= 3 || nextAccuracy < prevAccuracy) {
+        lastAcceptedLocationRef.current = nextLoc;
+        setDeviceLocation(nextLoc);
+      }
+    };
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        const loc = {
+        const loc: DeviceLocation = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
           accuracy: pos.coords.accuracy ?? null,
+          speed: pos.coords.speed ?? null,
         };
 
         console.log("LOCALIZAÇÃO INICIAL:", loc);
-        applyLocation(loc, true);
+        acceptLocation(loc);
       },
       (error) => {
         console.log("Erro localização inicial:", error);
       },
       {
         enableHighAccuracy: true,
-        timeout: 15000,
-        maximumAge: 5000,
+        timeout: 12000,
+        maximumAge: 0,
       }
     );
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        const loc = {
+        const loc: DeviceLocation = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
           accuracy: pos.coords.accuracy ?? null,
+          speed: pos.coords.speed ?? null,
         };
 
         console.log("LOCALIZAÇÃO ATUALIZADA:", loc);
-        applyLocation(loc);
+        acceptLocation(loc);
       },
       (error) => {
         console.log("Erro geolocalização:", error);
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 3000,
-        timeout: 15000,
+        maximumAge: 0,
+        timeout: 12000,
       }
     );
 
@@ -317,14 +299,9 @@ export default function App() {
 
         setTimeout(() => {
           iniciarNavegacao(nextDestination);
-        }, 400);
+        }, 500);
 
         await refreshQuickAccess();
-      }
-
-      if (res?.meta?.navigation?.active === false) {
-        setDestination(null);
-        setSteps([]);
       }
 
       sessionTokenRef.current = generateSessionToken();
@@ -574,7 +551,7 @@ export default function App() {
         </div>
       </main>
 
-      {showMap && (
+      {showMap && deviceLocation && (
         <div
           style={{
             position: "fixed",
@@ -623,25 +600,11 @@ export default function App() {
                 maxWidth: "calc(100vw - 32px)",
               }}
             >
-              <DrivingMode destination={destination} steps={steps} />
-            </div>
-          )}
-
-          {!deviceLocation && (
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                color: "#fff",
-                zIndex: 1001,
-                padding: 24,
-                textAlign: "center",
-              }}
-            >
-              Aguardando a localização atual do aparelho para abrir o mapa.
+              <DrivingMode
+                destination={destination}
+                steps={steps}
+                currentLocation={deviceLocation}
+              />
             </div>
           )}
 
