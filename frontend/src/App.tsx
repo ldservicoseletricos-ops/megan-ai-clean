@@ -5,6 +5,7 @@ import {
   checkHealth,
   sendChatMessage,
   suggestNavigation,
+  getNavigationQuickAccess,
 } from "./services/api";
 
 type Message = {
@@ -20,6 +21,14 @@ type Step = {
 type NavigationSuggestion = {
   text: string;
   placeId?: string;
+  type?: "favorite" | "recent" | "google";
+};
+
+type QuickAccessItem = {
+  id?: string;
+  label?: string;
+  address?: string;
+  name?: string;
 };
 
 function normalizeText(value: string) {
@@ -70,11 +79,28 @@ export default function App() {
   const [suggestions, setSuggestions] = useState<NavigationSuggestion[]>([]);
   const [isSuggesting, setIsSuggesting] = useState(false);
 
+  const [favorites, setFavorites] = useState<QuickAccessItem[]>([]);
+  const [recent, setRecent] = useState<QuickAccessItem[]>([]);
+
   const debounceRef = useRef<number | null>(null);
   const sessionTokenRef = useRef(generateSessionToken());
 
   useEffect(() => {
     checkHealth().then(() => setStatus("Online"));
+  }, []);
+
+  useEffect(() => {
+    async function loadQuickAccess() {
+      try {
+        const res = await getNavigationQuickAccess();
+        setFavorites(Array.isArray(res?.favorites) ? res.favorites : []);
+        setRecent(Array.isArray(res?.recent) ? res.recent : []);
+      } catch (error) {
+        console.log("Erro ao carregar favoritos e recentes:", error);
+      }
+    }
+
+    loadQuickAccess();
   }, []);
 
   useEffect(() => {
@@ -135,7 +161,7 @@ export default function App() {
       window.clearTimeout(debounceRef.current);
     }
 
-    if (trimmed.length < 3 || !looksLikeNavigationInput(trimmed)) {
+    if (trimmed.length < 2 || !looksLikeNavigationInput(trimmed)) {
       setSuggestions([]);
       setIsSuggesting(false);
       return;
@@ -172,6 +198,16 @@ export default function App() {
     console.log("Navegação interna iniciada:", dest);
   };
 
+  async function refreshQuickAccess() {
+    try {
+      const res = await getNavigationQuickAccess();
+      setFavorites(Array.isArray(res?.favorites) ? res.favorites : []);
+      setRecent(Array.isArray(res?.recent) ? res.recent : []);
+    } catch (error) {
+      console.log("Erro ao atualizar favoritos e recentes:", error);
+    }
+  }
+
   async function handleSend(messageOverride?: string) {
     const trimmed = String(messageOverride ?? input).trim();
     if (!trimmed) return;
@@ -207,6 +243,8 @@ export default function App() {
         setTimeout(() => {
           iniciarNavegacao(nextDestination);
         }, 800);
+
+        await refreshQuickAccess();
       }
 
       sessionTokenRef.current = generateSessionToken();
@@ -231,6 +269,20 @@ export default function App() {
     handleSend(suggestion.text);
   }
 
+  function handleQuickAccessClick(item: QuickAccessItem) {
+    const text = item.address || item.name || item.label || "";
+    if (!text) return;
+
+    setInput(text);
+    handleSend(text);
+  }
+
+  function renderSuggestionBadge(type?: string) {
+    if (type === "favorite") return "⭐";
+    if (type === "recent") return "🕘";
+    return "📍";
+  }
+
   return (
     <div style={{ display: "flex", height: "100vh", background: "#343541" }}>
       <aside
@@ -242,11 +294,68 @@ export default function App() {
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
+          gap: 20,
         }}
       >
         <div>
           <h2>Megan OS</h2>
           <p style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</p>
+
+          <div style={{ marginTop: 20 }}>
+            <h3 style={{ fontSize: 14, marginBottom: 10 }}>Favoritos</h3>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {favorites.map((item, index) => (
+                <button
+                  key={`${item.id || item.label || item.address}-${index}`}
+                  onClick={() => handleQuickAccessClick(item)}
+                  style={{
+                    textAlign: "left",
+                    background: "#2a2b32",
+                    color: "#fff",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    cursor: "pointer",
+                    fontSize: 13,
+                  }}
+                >
+                  ⭐ {item.label || item.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ marginTop: 20 }}>
+            <h3 style={{ fontSize: 14, marginBottom: 10 }}>Recentes</h3>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {recent.length === 0 && (
+                <div style={{ fontSize: 12, opacity: 0.65 }}>
+                  Nenhum destino recente
+                </div>
+              )}
+
+              {recent.map((item, index) => (
+                <button
+                  key={`${item.name || item.address}-${index}`}
+                  onClick={() => handleQuickAccessClick(item)}
+                  style={{
+                    textAlign: "left",
+                    background: "#2a2b32",
+                    color: "#fff",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    cursor: "pointer",
+                    fontSize: 13,
+                  }}
+                >
+                  🕘 {item.name || item.address}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <button
@@ -346,7 +455,7 @@ export default function App() {
                     fontSize: 14,
                   }}
                 >
-                  📍 {item.text}
+                  {renderSuggestionBadge(item.type)} {item.text}
                 </button>
               ))}
             </div>

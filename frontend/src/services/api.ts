@@ -82,3 +82,8 @@ export async function suggestNavigation(
   const { data } = await api.post("/api/navigation/suggest", payload);
   return data;
 }
+
+export async function getNavigationQuickAccess() {
+  const { data } = await api.get("/api/navigation/quick-access");
+  return data;
+}
