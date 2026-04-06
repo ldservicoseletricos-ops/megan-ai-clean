@@ -81,6 +81,7 @@ function cleanDestinationText(text) {
     .replace(/^rota para\s+/i, "")
     .replace(/^me leve para\s+/i, "")
     .replace(/^abrir rota para\s+/i, "")
+    .replace(/^abrir mapa para\s+/i, "")
     .replace(/^navegar\s+/i, "")
     .replace(/^rota\s+/i, "")
     .trim();
@@ -98,6 +99,7 @@ function detectNavigationIntent(message) {
     "rota para ",
     "me leve para ",
     "abrir rota para ",
+    "abrir mapa para ",
     "navegar ",
     "rota ",
   ];
@@ -113,6 +115,24 @@ function detectNavigationIntent(message) {
         };
       }
     }
+  }
+
+  const looksLikeAddress =
+    text.includes("rua ") ||
+    text.includes("avenida ") ||
+    text.includes("av ") ||
+    text.includes("estrada ") ||
+    text.includes("rodovia ") ||
+    text.includes("travessa ") ||
+    text.includes("alameda ") ||
+    text.includes("praca ") ||
+    text.includes("praça ");
+
+  if (looksLikeAddress) {
+    return {
+      isNavigationRequest: true,
+      destinationText: original,
+    };
   }
 
   return {
@@ -268,7 +288,75 @@ function getKnownDestination(query) {
     };
   }
 
+  if (
+    normalized.includes("rua presidente wenceslau") ||
+    normalized.includes("rua presidente venceslau") ||
+    normalized.includes("presidente wenceslau diadema") ||
+    normalized.includes("presidente venceslau diadema")
+  ) {
+    return {
+      latitude: -23.7257724,
+      longitude: -46.6157211,
+      name: "Rua Presidente Wenceslau, Eldorado, Diadema - SP, Brasil",
+    };
+  }
+
   return null;
+}
+
+async function googleGeocode(address) {
+  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+
+  if (!googleMapsApiKey) {
+    console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
+    return null;
+  }
+
+  const url =
+    `https://maps.googleapis.com/maps/api/geocode/json` +
+    `?address=${encodeURIComponent(address)}` +
+    `&key=${encodeURIComponent(googleMapsApiKey)}` +
+    `&region=br` +
+    `&language=pt-BR`;
+
+  const res = await fetch(url);
+  const data = await res.json();
+
+  if (data?.status === "OK" && Array.isArray(data.results) && data.results.length > 0) {
+    const result = data.results[0];
+
+    return {
+      latitude: Number(result.geometry.location.lat),
+      longitude: Number(result.geometry.location.lng),
+      name: result.formatted_address,
+    };
+  }
+
+  console.log("⚠️ Google Geocoding sem resultado:", data?.status, address);
+  return null;
+}
+
+function buildAddressCandidates(cleaned) {
+  const candidates = new Set();
+
+  candidates.add(cleaned);
+  candidates.add(`${cleaned}, Diadema, SP, Brasil`);
+  candidates.add(`${cleaned}, São Bernardo do Campo, SP, Brasil`);
+  candidates.add(`${cleaned}, São Paulo, SP, Brasil`);
+
+  const normalized = normalizeText(cleaned);
+
+  if (normalized.includes("venceslau")) {
+    candidates.add(cleaned.replace(/venceslau/gi, "Wenceslau"));
+    candidates.add(`${cleaned.replace(/venceslau/gi, "Wenceslau")}, Diadema, SP, Brasil`);
+  }
+
+  if (normalized.includes("wenceslau")) {
+    candidates.add(cleaned.replace(/wenceslau/gi, "Venceslau"));
+    candidates.add(`${cleaned.replace(/wenceslau/gi, "Venceslau")}, Diadema, SP, Brasil`);
+  }
+
+  return Array.from(candidates);
 }
 
 async function geocodeDestination(query) {
@@ -287,75 +375,19 @@ async function geocodeDestination(query) {
     return known;
   }
 
-  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+  const candidates = buildAddressCandidates(cleaned);
 
-  if (!googleMapsApiKey) {
-    console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
-    return null;
-  }
+  for (const candidate of candidates) {
+    try {
+      const result = await googleGeocode(candidate);
 
-  try {
-    const url =
-      `https://maps.googleapis.com/maps/api/geocode/json` +
-      `?address=${encodeURIComponent(cleaned)}` +
-      `&key=${encodeURIComponent(googleMapsApiKey)}` +
-      `&region=br` +
-      `&language=pt-BR`;
-
-    const res = await fetch(url);
-    const data = await res.json();
-
-    if (data?.status === "OK" && Array.isArray(data.results) && data.results.length > 0) {
-      const result = data.results[0];
-
-      const location = {
-        latitude: Number(result.geometry.location.lat),
-        longitude: Number(result.geometry.location.lng),
-        name: result.formatted_address,
-      };
-
-      destinationCache.set(normalized, location);
-      return location;
+      if (result) {
+        destinationCache.set(normalized, result);
+        return result;
+      }
+    } catch (err) {
+      console.log("Erro geocode Google:", err);
     }
-
-    console.log("⚠️ Google Geocoding sem resultado direto:", data?.status, cleaned);
-  } catch (err) {
-    console.log("Erro geocode Google:", err);
-  }
-
-  try {
-    const fallbackQuery = `${cleaned}, São Paulo, Brasil`;
-
-    const fallbackUrl =
-      `https://maps.googleapis.com/maps/api/geocode/json` +
-      `?address=${encodeURIComponent(fallbackQuery)}` +
-      `&key=${encodeURIComponent(googleMapsApiKey)}` +
-      `&region=br` +
-      `&language=pt-BR`;
-
-    const fallbackRes = await fetch(fallbackUrl);
-    const fallbackData = await fallbackRes.json();
-
-    if (
-      fallbackData?.status === "OK" &&
-      Array.isArray(fallbackData.results) &&
-      fallbackData.results.length > 0
-    ) {
-      const result = fallbackData.results[0];
-
-      const location = {
-        latitude: Number(result.geometry.location.lat),
-        longitude: Number(result.geometry.location.lng),
-        name: result.formatted_address,
-      };
-
-      destinationCache.set(normalized, location);
-      return location;
-    }
-
-    console.log("⚠️ Google Geocoding sem resultado fallback:", fallbackData?.status, fallbackQuery);
-  } catch (err) {
-    console.log("Erro fallback geocode Google:", err);
   }
 
   return null;
