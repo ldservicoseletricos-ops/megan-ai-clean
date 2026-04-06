@@ -27,6 +27,7 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://127.0.0.1:3000",
   "https://megan-ai-clean-wnst.vercel.app",
+  "https://megan-ai-clean.vercel.app",
   "https://hoppscotch.io",
   env.frontendUrl,
 ].filter(Boolean);
@@ -42,12 +43,17 @@ function isAllowedOrigin(origin) {
     const url = new URL(origin);
     const host = url.hostname.toLowerCase();
 
-    if (host === "megan-ai-clean-wnst.vercel.app") {
-      return true;
-    }
+    // aceita previews/deploys do projeto Megan hospedados na Vercel
+    if (host.endsWith(".vercel.app")) {
+      const isMeganPreview =
+        host.startsWith("megan-ai-clean-") ||
+        host.startsWith("megan-ai-clean.") ||
+        host === "megan-ai-clean.vercel.app" ||
+        host === "megan-ai-clean-wnst.vercel.app";
 
-    if (host.endsWith(".vercel.app") && host.includes("megan-ai-clean-wnst")) {
-      return true;
+      if (isMeganPreview) {
+        return true;
+      }
     }
 
     return false;
