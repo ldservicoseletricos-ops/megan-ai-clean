@@ -99,11 +99,18 @@ function normalizeText(value) {
 function getKnownDestination(query) {
   const normalized = normalizeText(query);
 
-  if (normalized.includes("praca da moca")) {
+  if (
+    normalized.includes("praca da moca") ||
+    normalized.includes("paraca da moca") ||
+    normalized.includes("praca moca") ||
+    normalized.includes("moca diadema") ||
+    normalized.includes("praca da moca diadema") ||
+    normalized.includes("paraca da moca diadema")
+  ) {
     return {
-      latitude: -23.686358,
-      longitude: -46.622981,
-      name: "Praça da Moça, Diadema, SP",
+      latitude: -23.688958,
+      longitude: -46.625296,
+      name: "Praça da Moça, Centro, Diadema - SP",
     };
   }
 
@@ -207,6 +214,17 @@ app.post("/api/chat", async (req, res) => {
           },
         });
       }
+
+      return res.json({
+        ok: true,
+        reply: `Entendi o destino "${nav.destinationText}", mas não consegui localizar esse lugar com precisão. Tente enviar o nome com cidade e estado.`,
+        meta: {
+          navigation: {
+            active: false,
+            destination: null,
+          },
+        },
+      });
     }
 
     if (ai && message) {
