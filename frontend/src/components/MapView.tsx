@@ -110,7 +110,7 @@ export default function MapView({
   const hasCenteredInitialLocationRef = useRef(false);
   const hasFittedCurrentRouteRef = useRef(false);
   const isRoutingRef = useRef(false);
-  const followUserRef = useRef(true);
+  const followUserRef = useRef(false);
   const lastRoutedOriginRef = useRef<LatLngLike | null>(null);
   const lastRoutedDestinationRef = useRef<LatLngLike | null>(null);
   const lastRouteUpdateRef = useRef(0);
@@ -243,13 +243,23 @@ export default function MapView({
         destinationMarkerRef.current = null;
       }
 
+      if (directionsRenderer.current) {
+        directionsRenderer.current.setDirections({
+          routes: [],
+          request: {
+            travelMode: window.google?.maps?.TravelMode?.DRIVING,
+          },
+        } as unknown as google.maps.DirectionsResult);
+      }
+
       if (onStepsUpdate) {
         onStepsUpdate([]);
       }
 
-      followUserRef.current = true;
+      followUserRef.current = false;
     } else {
-      followUserRef.current = true;
+      followUserRef.current = false;
+      hasFittedCurrentRouteRef.current = false;
     }
   }, [destination, onStepsUpdate]);
 
@@ -390,7 +400,7 @@ export default function MapView({
           const bounds = new google.maps.LatLngBounds();
           bounds.extend(currentOrigin);
           bounds.extend(destinationPosition);
-          mapObj.current?.fitBounds(bounds);
+          mapObj.current.fitBounds(bounds);
           hasFittedCurrentRouteRef.current = true;
         }
 
