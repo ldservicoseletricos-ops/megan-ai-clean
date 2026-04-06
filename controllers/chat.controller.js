@@ -67,11 +67,24 @@ function cleanDestinationText(text) {
 function detectNavigationIntent(message) {
   const text = normalizeText(message);
 
-  if (
+  const isExplicitCommand =
     text.startsWith("navegar") ||
     text.startsWith("ir para") ||
-    text.startsWith("rota")
-  ) {
+    text.startsWith("rota");
+
+  const looksLikeAddress =
+    text.includes("rua") ||
+    text.includes("avenida") ||
+    text.includes("av") ||
+    text.includes("estrada") ||
+    text.includes("rodovia") ||
+    text.includes("praça") ||
+    text.includes("praca") ||
+    text.includes("centro") ||
+    text.includes("bairro") ||
+    text.includes("shopping");
+
+  if (isExplicitCommand || looksLikeAddress) {
     return {
       isNavigationRequest: true,
       destinationText: cleanDestinationText(message),
