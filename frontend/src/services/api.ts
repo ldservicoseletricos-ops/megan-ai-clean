@@ -54,3 +54,31 @@ export async function resolveNavigationDestination(message: string) {
 
   return data;
 }
+
+export async function suggestNavigation(
+  input: string,
+  deviceLocation: {
+    latitude: number;
+    longitude: number;
+    accuracy?: number | null;
+  } | null,
+  sessionToken: string
+) {
+  const payload = {
+    input,
+    sessionToken,
+    deviceLocation: deviceLocation
+      ? {
+          latitude: Number(deviceLocation.latitude),
+          longitude: Number(deviceLocation.longitude),
+          accuracy:
+            typeof deviceLocation.accuracy === "number"
+              ? deviceLocation.accuracy
+              : null,
+        }
+      : null,
+  };
+
+  const { data } = await api.post("/api/navigation/suggest", payload);
+  return data;
+}

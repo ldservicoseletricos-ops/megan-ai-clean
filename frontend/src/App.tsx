@@ -1,9 +1,10 @@
 import MapView from "./components/MapView";
 import DrivingMode from "./components/DrivingMode";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   checkHealth,
-  sendChatMessage
+  sendChatMessage,
+  suggestNavigation,
 } from "./services/api";
 
 type Message = {
@@ -16,6 +17,47 @@ type Step = {
   end_location: { lat: number; lng: number };
 };
 
+type NavigationSuggestion = {
+  text: string;
+  placeId?: string;
+};
+
+function normalizeText(value: string) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function looksLikeNavigationInput(value: string) {
+  const text = normalizeText(value);
+
+  return (
+    text.startsWith("navegar") ||
+    text.startsWith("ir para") ||
+    text.startsWith("ir pra") ||
+    text.startsWith("rota") ||
+    text.includes("rua ") ||
+    text.includes("avenida ") ||
+    text.includes("av ") ||
+    text.includes("estrada ") ||
+    text.includes("rodovia ") ||
+    text.includes("travessa ") ||
+    text.includes("alameda ") ||
+    text.includes("praca ") ||
+    text.includes("praça ")
+  );
+}
+
+function generateSessionToken() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
 export default function App() {
   const [status, setStatus] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -24,6 +66,12 @@ export default function App() {
   const [destination, setDestination] = useState<any>(null);
   const [steps, setSteps] = useState<Step[]>([]);
   const [showMap, setShowMap] = useState(false);
+
+  const [suggestions, setSuggestions] = useState<NavigationSuggestion[]>([]);
+  const [isSuggesting, setIsSuggesting] = useState(false);
+
+  const debounceRef = useRef<number | null>(null);
+  const sessionTokenRef = useRef(generateSessionToken());
 
   useEffect(() => {
     checkHealth().then(() => setStatus("Online"));
@@ -80,17 +128,58 @@ export default function App() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // ✅ NAVEGAÇÃO AGORA É INTERNA
+  useEffect(() => {
+    const trimmed = input.trim();
+
+    if (debounceRef.current) {
+      window.clearTimeout(debounceRef.current);
+    }
+
+    if (trimmed.length < 3 || !looksLikeNavigationInput(trimmed)) {
+      setSuggestions([]);
+      setIsSuggesting(false);
+      return;
+    }
+
+    debounceRef.current = window.setTimeout(async () => {
+      try {
+        setIsSuggesting(true);
+
+        const res = await suggestNavigation(
+          trimmed,
+          deviceLocation,
+          sessionTokenRef.current
+        );
+
+        setSuggestions(Array.isArray(res?.suggestions) ? res.suggestions : []);
+      } catch (error) {
+        console.log("Erro ao buscar sugestões:", error);
+        setSuggestions([]);
+      } finally {
+        setIsSuggesting(false);
+      }
+    }, 350);
+
+    return () => {
+      if (debounceRef.current) {
+        window.clearTimeout(debounceRef.current);
+      }
+    };
+  }, [input, deviceLocation]);
+
   const iniciarNavegacao = (dest: any) => {
     if (!dest?.name) return;
     console.log("Navegação interna iniciada:", dest);
   };
 
-  async function handleSend() {
-    const trimmed = input.trim();
+  async function handleSend(messageOverride?: string) {
+    const trimmed = String(messageOverride ?? input).trim();
     if (!trimmed) return;
 
     console.log("ENVIANDO COM LOCALIZAÇÃO:", deviceLocation);
+
+    setSuggestions([]);
+    setIsSuggesting(false);
 
     setMessages((prev) => [
       ...prev,
@@ -115,11 +204,12 @@ export default function App() {
         setSteps([]);
         setShowMap(true);
 
-        // ✅ mantém o fluxo, mas sem abrir mapa externo
         setTimeout(() => {
           iniciarNavegacao(nextDestination);
         }, 800);
       }
+
+      sessionTokenRef.current = generateSessionToken();
     } catch (error) {
       console.log("Erro ao enviar mensagem:", error);
 
@@ -133,6 +223,12 @@ export default function App() {
     }
 
     setInput("");
+  }
+
+  function handleSuggestionSelect(suggestion: NavigationSuggestion) {
+    setInput(suggestion.text);
+    setSuggestions([]);
+    handleSend(suggestion.text);
   }
 
   return (
@@ -174,6 +270,7 @@ export default function App() {
           display: "flex",
           flexDirection: "column",
           justifyContent: "space-between",
+          position: "relative",
         }}
       >
         <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
@@ -202,7 +299,59 @@ export default function App() {
           ))}
         </div>
 
-        <div style={{ padding: 20, borderTop: "1px solid #444" }}>
+        <div style={{ padding: 20, borderTop: "1px solid #444", position: "relative" }}>
+          {(suggestions.length > 0 || isSuggesting) && (
+            <div
+              style={{
+                position: "absolute",
+                left: 20,
+                right: 20,
+                bottom: 84,
+                background: "#1f2937",
+                border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: 14,
+                boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
+                overflow: "hidden",
+                zIndex: 20,
+              }}
+            >
+              {isSuggesting && suggestions.length === 0 && (
+                <div
+                  style={{
+                    padding: 14,
+                    color: "#cbd5e1",
+                    fontSize: 14,
+                  }}
+                >
+                  Buscando sugestões...
+                </div>
+              )}
+
+              {suggestions.map((item, index) => (
+                <button
+                  key={`${item.text}-${index}`}
+                  onClick={() => handleSuggestionSelect(item)}
+                  style={{
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "14px 16px",
+                    border: "none",
+                    borderBottom:
+                      index !== suggestions.length - 1
+                        ? "1px solid rgba(255,255,255,0.08)"
+                        : "none",
+                    background: "transparent",
+                    color: "#fff",
+                    cursor: "pointer",
+                    fontSize: 14,
+                  }}
+                >
+                  📍 {item.text}
+                </button>
+              ))}
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 10 }}>
             <input
               value={input}
@@ -220,7 +369,7 @@ export default function App() {
               }}
             />
             <button
-              onClick={handleSend}
+              onClick={() => handleSend()}
               style={{
                 background: "#10a37f",
                 border: "none",
