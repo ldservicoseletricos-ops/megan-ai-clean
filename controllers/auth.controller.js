@@ -42,17 +42,24 @@ function buildSafeUser(row) {
     email: row.email,
     provider: row.provider,
     emailVerified: row.email_verified,
+    avatar: row.avatar || null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
 }
 
+function getFrontendUrl() {
+  return String(env.frontendUrl || process.env.FRONTEND_URL || "").trim() || "http://localhost:5173";
+}
+
+function getGoogleCallbackUrl() {
+  return String(env.googleCallbackUrl || process.env.GOOGLE_CALLBACK_URL || "").trim();
+}
+
 function buildGoogleClient() {
   const clientId = env.googleClientId || process.env.GOOGLE_CLIENT_ID;
-  const clientSecret =
-    env.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET;
-  const callbackUrl =
-    env.googleCallbackUrl || process.env.GOOGLE_CALLBACK_URL;
+  const clientSecret = env.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET;
+  const callbackUrl = getGoogleCallbackUrl();
 
   return new google.auth.OAuth2(clientId, clientSecret, callbackUrl);
 }
@@ -113,7 +120,7 @@ export async function registerUser(req, res) {
         email_verified
       )
       VALUES ($1, $2, $3, 'local', false)
-      RETURNING id, name, email, provider, email_verified, created_at, updated_at
+      RETURNING id, name, email, provider, email_verified, avatar, created_at, updated_at
       `,
       [name, email, passwordHash]
     );
@@ -158,7 +165,7 @@ export async function loginUser(req, res) {
 
     const result = await query(
       `
-      SELECT id, name, email, password_hash, provider, email_verified, created_at, updated_at
+      SELECT id, name, email, password_hash, provider, email_verified, avatar, created_at, updated_at
       FROM users
       WHERE email = $1
       LIMIT 1
@@ -220,15 +227,18 @@ export async function getMe(req, res) {
 export async function googleStartController(req, res) {
   try {
     const clientId = env.googleClientId || process.env.GOOGLE_CLIENT_ID;
-    const clientSecret =
-      env.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET;
-    const callbackUrl =
-      env.googleCallbackUrl || process.env.GOOGLE_CALLBACK_URL;
+    const clientSecret = env.googleClientSecret || process.env.GOOGLE_CLIENT_SECRET;
+    const callbackUrl = getGoogleCallbackUrl();
 
     if (!clientId || !clientSecret || !callbackUrl) {
       return res.status(500).json({
         ok: false,
         error: "Google OAuth não configurado no backend",
+        details: {
+          hasClientId: Boolean(clientId),
+          hasClientSecret: Boolean(clientSecret),
+          hasCallbackUrl: Boolean(callbackUrl),
+        },
       });
     }
 
@@ -253,7 +263,7 @@ export async function googleStartController(req, res) {
 
 export async function googleCallbackController(req, res) {
   try {
-    const code = String(req.query?.code || "");
+    const code = String(req.query?.code || "").trim();
 
     if (!code) {
       return res.status(400).send("Código do Google ausente");
@@ -271,9 +281,10 @@ export async function googleCallbackController(req, res) {
 
     const { data } = await oauth2.userinfo.get();
 
-    const googleId = String(data.id || "");
+    const googleId = String(data.id || "").trim();
     const email = normalizeEmail(data.email);
     const name = normalizeText(data.name || "Usuário Google");
+    const avatar = normalizeText(data.picture || "");
     const emailVerified = Boolean(data.verified_email);
 
     if (!googleId || !email) {
@@ -282,7 +293,7 @@ export async function googleCallbackController(req, res) {
 
     const existingByEmail = await query(
       `
-      SELECT id, name, email, provider, email_verified, created_at, updated_at
+      SELECT id, name, email, provider, email_verified, avatar, created_at, updated_at
       FROM users
       WHERE email = $1
       LIMIT 1
@@ -301,11 +312,12 @@ export async function googleCallbackController(req, res) {
           google_id = $2,
           provider = 'google',
           email_verified = $3,
+          avatar = COALESCE(NULLIF($4, ''), avatar),
           updated_at = NOW()
-        WHERE email = $4
-        RETURNING id, name, email, provider, email_verified, created_at, updated_at
+        WHERE email = $5
+        RETURNING id, name, email, provider, email_verified, avatar, created_at, updated_at
         `,
-        [name, googleId, emailVerified, email]
+        [name, googleId, emailVerified, avatar, email]
       );
 
       userRow = updated.rows[0];
@@ -317,12 +329,13 @@ export async function googleCallbackController(req, res) {
           email,
           google_id,
           provider,
-          email_verified
+          email_verified,
+          avatar
         )
-        VALUES ($1, $2, $3, 'google', $4)
-        RETURNING id, name, email, provider, email_verified, created_at, updated_at
+        VALUES ($1, $2, $3, 'google', $4, $5)
+        RETURNING id, name, email, provider, email_verified, avatar, created_at, updated_at
         `,
-        [name, email, googleId, emailVerified]
+        [name, email, googleId, emailVerified, avatar]
       );
 
       userRow = inserted.rows[0];
@@ -330,10 +343,7 @@ export async function googleCallbackController(req, res) {
 
     const user = buildSafeUser(userRow);
     const token = buildJwt(user);
-
-    const frontendUrl =
-      String(env.frontendUrl || process.env.FRONTEND_URL || "").trim() ||
-      "http://localhost:5173";
+    const frontendUrl = getFrontendUrl();
 
     const redirectUrl =
       `${frontendUrl}?token=${encodeURIComponent(token)}` +
