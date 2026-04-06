@@ -26,10 +26,23 @@ export async function sendChatMessage(
     accuracy?: number | null;
   } | null
 ) {
-  const { data } = await api.post("/api/chat", {
+  const payload = {
     message,
-    deviceLocation,
-  });
+    deviceLocation: deviceLocation
+      ? {
+          latitude: Number(deviceLocation.latitude),
+          longitude: Number(deviceLocation.longitude),
+          accuracy:
+            typeof deviceLocation.accuracy === "number"
+              ? deviceLocation.accuracy
+              : null,
+        }
+      : null,
+  };
+
+  console.log("sendChatMessage payload:", payload);
+
+  const { data } = await api.post("/api/chat", payload);
 
   return data;
 }
