@@ -745,26 +745,13 @@ function buildLocalSuggestionCandidates(input) {
     }
   );
 
-  const filtered = localCandidates.filter((item) => {
+  return localCandidates.filter((item) => {
     const normalizedText = normalizeText(item.text);
     return (
       normalizedText.includes(normalizedInput) ||
       normalizedInput.includes(normalizedText)
     );
   });
-
-  const unique = [];
-  const seen = new Set();
-
-  for (const item of filtered) {
-    const key = `${item.type}:${normalizeText(item.text)}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      unique.push(item);
-    }
-  }
-
-  return unique;
 }
 
 async function fetchAutocompleteNew(input, deviceLocation, sessionToken) {
@@ -861,7 +848,6 @@ async function fetchAutocompleteLegacy(input, deviceLocation, sessionToken) {
     language: "pt-BR",
     components: "country:br",
     sessiontoken: sessionToken || "",
-    types: "geocode",
   });
 
   if (normalizedLocation) {
@@ -906,6 +892,22 @@ async function fetchAutocompleteLegacy(input, deviceLocation, sessionToken) {
     console.error("❌ Erro Autocomplete Legacy:", error);
     return [];
   }
+}
+
+async function buildDirectGeocodeSuggestion(input) {
+  const result = await geocodeDestination(input);
+
+  if (!result?.name) return [];
+
+  return [
+    {
+      text: result.name,
+      placeId: "",
+      type: "google",
+      address: result.name,
+      distance: null,
+    },
+  ];
 }
 
 async function rankSuggestionsByPriority(items, deviceLocation) {
@@ -986,6 +988,10 @@ async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionTok
       deviceLocation,
       sessionToken
     );
+  }
+
+  if (googleSuggestions.length === 0) {
+    googleSuggestions = await buildDirectGeocodeSuggestion(cleanedInput);
   }
 
   const merged = [...localSuggestions, ...googleSuggestions];
