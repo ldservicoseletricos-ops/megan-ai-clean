@@ -11,12 +11,18 @@ type Message = {
   content: string;
 };
 
+type Step = {
+  instruction: string;
+  end_location: { lat: number; lng: number };
+};
+
 export default function App() {
   const [status, setStatus] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [deviceLocation, setDeviceLocation] = useState<any>(null);
   const [destination, setDestination] = useState<any>(null);
+  const [steps, setSteps] = useState<Step[]>([]);
   const [showMap, setShowMap] = useState(false);
 
   useEffect(() => {
@@ -74,7 +80,6 @@ export default function App() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // ✅ ADIÇÃO (NOVA FUNÇÃO — NÃO QUEBRA NADA)
   const iniciarNavegacao = (dest: any) => {
     if (!dest?.name) return;
 
@@ -115,17 +120,17 @@ export default function App() {
         },
       ]);
 
-      // 🔥 ALTERAÇÃO MÍNIMA (SÓ ISSO)
       if (res?.meta?.navigation?.active && res?.meta?.navigation?.destination) {
-        setDestination(res.meta.navigation.destination);
+        const nextDestination = res.meta.navigation.destination;
+
+        setDestination(nextDestination);
+        setSteps([]);
         setShowMap(true);
 
-        // 🚀 AUTO INICIAR NAVEGAÇÃO
         setTimeout(() => {
-          iniciarNavegacao(res.meta.navigation.destination);
+          iniciarNavegacao(nextDestination);
         }, 800);
       }
-
     } catch (error) {
       console.log("Erro ao enviar mensagem:", error);
 
@@ -291,12 +296,16 @@ export default function App() {
                 maxWidth: "calc(100vw - 32px)",
               }}
             >
-              <DrivingMode destination={destination} />
+              <DrivingMode destination={destination} steps={steps} />
             </div>
           )}
 
           <div style={{ width: "100%", height: "100%" }}>
-            <MapView location={deviceLocation} destination={destination} />
+            <MapView
+              location={deviceLocation}
+              destination={destination}
+              onStepsUpdate={setSteps}
+            />
           </div>
         </div>
       )}
