@@ -1,31 +1,15 @@
 import MapView from "./components/MapView";
+import DrivingMode from "./components/DrivingMode";
 import { useEffect, useState } from "react";
 import {
   checkHealth,
-  sendChatMessage,
-  resolveNavigationDestination,
+  sendChatMessage
 } from "./services/api";
 
 type Message = {
   role: "user" | "assistant";
   content: string;
 };
-
-function isNavigationRequest(message: string) {
-  const text = String(message || "").toLowerCase().trim();
-
-  return [
-    "navegar para ",
-    "navegação para ",
-    "ir para ",
-    "me leve para ",
-    "quero ir para ",
-    "rota para ",
-    "abrir rota para ",
-    "iniciar rota para ",
-    "traçar rota para ",
-  ].some((pattern) => text.includes(pattern));
-}
 
 export default function App() {
   const [status, setStatus] = useState("");
@@ -64,43 +48,19 @@ export default function App() {
     const trimmed = input.trim();
     if (!trimmed) return;
 
-    let navigationReply = "";
-    let navigationResolved = false;
-
     setMessages((prev) => [
       ...prev,
       { role: "user", content: trimmed },
     ]);
 
     try {
-      if (isNavigationRequest(trimmed)) {
-        try {
-          const navResult = await resolveNavigationDestination(trimmed);
-
-          if (
-            navResult?.ok &&
-            navResult?.navigation?.active &&
-            navResult?.navigation?.destination
-          ) {
-            setDestination(navResult.navigation.destination);
-            setShowMap(true);
-            navigationResolved = true;
-            navigationReply = `Certo, abrindo a navegação para ${navResult.navigation.destination.name}.`;
-          }
-        } catch (err) {
-          console.log("Erro navigation resolve:", err);
-        }
-      }
-
       const res = await sendChatMessage(trimmed, deviceLocation);
 
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: navigationResolved
-            ? navigationReply
-            : res.reply,
+          content: res.reply,
         },
       ]);
 
@@ -164,13 +124,7 @@ export default function App() {
           justifyContent: "space-between",
         }}
       >
-        <div
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            padding: 20,
-          }}
-        >
+        <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
           {messages.map((m, i) => (
             <div
               key={i}
@@ -196,25 +150,13 @@ export default function App() {
           ))}
         </div>
 
-        <div
-          style={{
-            padding: 20,
-            borderTop: "1px solid #444",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              gap: 10,
-            }}
-          >
+        <div style={{ padding: 20, borderTop: "1px solid #444" }}>
+          <div style={{ display: "flex", gap: 10 }}>
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  handleSend();
-                }
+                if (e.key === "Enter") handleSend();
               }}
               placeholder="Digite uma mensagem ou peça navegação..."
               style={{
@@ -245,32 +187,59 @@ export default function App() {
       {showMap && deviceLocation && (
         <div
           style={{
-            width: 420,
+            position: "fixed",
+            inset: 0,
+            zIndex: 999,
             background: "#111827",
-            padding: 10,
-            color: "#fff",
-            borderLeft: "1px solid #2a2b32",
-            display: "flex",
-            flexDirection: "column",
-            gap: 10,
+            overflow: "hidden",
           }}
         >
-          {!destination && (
-            <div
+          <div
+            style={{
+              position: "absolute",
+              top: 16,
+              right: 16,
+              zIndex: 1002,
+              display: "flex",
+              gap: 10,
+            }}
+          >
+            <button
+              onClick={() => setShowMap(false)}
               style={{
-                background: "#1f2937",
-                padding: 12,
-                borderRadius: 8,
-                fontSize: 14,
+                background: "rgba(17,24,39,0.92)",
+                color: "#fff",
+                border: "1px solid rgba(255,255,255,0.12)",
+                borderRadius: 12,
+                padding: "10px 14px",
+                cursor: "pointer",
+                fontWeight: 700,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+                backdropFilter: "blur(8px)",
               }}
             >
-              Mapa aberto. Para iniciar uma rota, peça no chat algo como:
-              <br />
-              <strong>“navegar para Praça da Moça Diadema”</strong>
+              Fechar mapa
+            </button>
+          </div>
+
+          {destination && (
+            <div
+              style={{
+                position: "absolute",
+                top: 16,
+                left: 16,
+                zIndex: 1002,
+                width: 360,
+                maxWidth: "calc(100vw - 32px)",
+              }}
+            >
+              <DrivingMode destination={destination} />
             </div>
           )}
 
-          <MapView location={deviceLocation} destination={destination} />
+          <div style={{ width: "100%", height: "100%" }}>
+            <MapView location={deviceLocation} destination={destination} />
+          </div>
         </div>
       )}
     </div>

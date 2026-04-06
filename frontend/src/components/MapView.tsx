@@ -1,152 +1,403 @@
-import { MapContainer, TileLayer, Marker, Popup, Polyline } from "react-leaflet";
-import L from "leaflet";
-import { useEffect, useState } from "react";
-import "leaflet/dist/leaflet.css";
+import { useEffect, useRef, useState } from "react";
 
-// FIX ÍCONE
-delete (L.Icon.Default.prototype as any)._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-});
+declare global {
+  interface Window {
+    google?: typeof google;
+  }
+}
 
-type Props = {
+type MapViewProps = {
   location: {
     latitude: number;
     longitude: number;
   } | null;
-  radar?: any;
-  destination?: any;
+  destination?: {
+    latitude: number;
+    longitude: number;
+    name?: string;
+  } | null;
 };
 
-export default function MapView({ location, radar, destination }: Props) {
-  const [route, setRoute] = useState<any[]>([]);
-  const [instructions, setInstructions] = useState<string[]>([]);
-  const [trafficStatus, setTrafficStatus] = useState<string>("");
+const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
-  function speak(text: string) {
-    const speech = new SpeechSynthesisUtterance(text);
-    speech.lang = "pt-BR";
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(speech);
-  }
+function loadGoogleMapsScript(): Promise<typeof google> {
+  return new Promise((resolve, reject) => {
+    if (window.google?.maps) {
+      resolve(window.google);
+      return;
+    }
+
+    const existingScript = document.getElementById(
+      "google-maps-script"
+    ) as HTMLScriptElement | null;
+
+    if (existingScript) {
+      existingScript.addEventListener("load", () => {
+        if (window.google?.maps) resolve(window.google);
+        else reject(new Error("Google Maps carregou sem window.google.maps"));
+      });
+      existingScript.addEventListener("error", () => {
+        reject(new Error("Falha ao carregar Google Maps"));
+      });
+      return;
+    }
+
+    if (!GOOGLE_MAPS_API_KEY) {
+      reject(new Error("VITE_GOOGLE_MAPS_API_KEY não configurada"));
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.id = "google-maps-script";
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=geometry`;
+    script.async = true;
+    script.defer = true;
+
+    script.onload = () => {
+      if (window.google?.maps) resolve(window.google);
+      else reject(new Error("Google Maps carregou sem window.google.maps"));
+    };
+
+    script.onerror = () => {
+      reject(new Error("Falha ao carregar Google Maps"));
+    };
+
+    document.head.appendChild(script);
+  });
+}
+
+function getBearing(lat1: number, lon1: number, lat2: number, lon2: number) {
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+
+  const y = Math.sin(dLon) * Math.cos((lat2 * Math.PI) / 180);
+  const x =
+    Math.cos((lat1 * Math.PI) / 180) * Math.sin((lat2 * Math.PI) / 180) -
+    Math.sin((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.cos(dLon);
+
+  const brng = Math.atan2(y, x);
+  return (((brng * 180) / Math.PI) + 360) % 360;
+}
+
+function smoothRotation(prev: number, next: number) {
+  const diff = ((next - prev + 540) % 360) - 180;
+  return prev + diff * 0.2;
+}
+
+export default function MapView({ location, destination }: MapViewProps) {
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  const googleMapRef = useRef<google.maps.Map | null>(null);
+  const userMarkerRef = useRef<google.maps.Marker | null>(null);
+  const destinationMarkerRef = useRef<google.maps.Marker | null>(null);
+  const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(
+    null
+  );
+  const infoWindowRef = useRef<google.maps.InfoWindow | null>(null);
+
+  const lastLocationRef = useRef<{ latitude: number; longitude: number } | null>(
+    null
+  );
+  const lastRotationRef = useRef(0);
+
+  const [mapReady, setMapReady] = useState(false);
+  const [distanceLeft, setDistanceLeft] = useState("--");
+  const [eta, setEta] = useState("--");
+  const [rotation, setRotation] = useState(0);
+  const [errorMessage, setErrorMessage] = useState("");
 
   useEffect(() => {
-    if (!location || !destination) return;
+    let mounted = true;
 
-    async function loadRoute() {
+    async function initMap() {
       try {
-        const response = await fetch(
-          `https://router.project-osrm.org/route/v1/driving/${location.longitude},${location.latitude};${destination.longitude},${destination.latitude}?overview=full&geometries=geojson&steps=true`
-        );
+        if (!mapRef.current || !location) return;
 
-        const data = await response.json();
+        const googleApi = await loadGoogleMapsScript();
 
-        const routeData = data.routes[0];
+        if (!mounted || !mapRef.current) return;
 
-        // rota
-        const coords = routeData.geometry.coordinates.map(
-          (c: any) => [c[1], c[0]]
-        );
-        setRoute(coords);
+        const center = {
+          lat: location.latitude,
+          lng: location.longitude,
+        };
 
-        // instruções
-        const steps = routeData.legs[0].steps;
-        const parsedInstructions = steps.map((step: any) => {
-          const name = step.name || "via";
-          const distance = Math.round(step.distance);
-          return `Siga por ${distance} metros na ${name}`;
+        const map = new googleApi.maps.Map(mapRef.current, {
+          center,
+          zoom: 19,
+          disableDefaultUI: true,
+          clickableIcons: false,
+          gestureHandling: "greedy",
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: false,
+          zoomControl: false,
+          tilt: 45,
+          heading: 0,
+          mapId: undefined,
         });
-        setInstructions(parsedInstructions);
 
-        // 🔥 SIMULAÇÃO DE TRÂNSITO (velocidade média)
-        const speed = routeData.distance / routeData.duration; // m/s
+        googleMapRef.current = map;
 
-        if (speed < 5) {
-          setTrafficStatus("🔴 Trânsito pesado");
-          speak("Atenção, trânsito intenso à frente");
-        } else if (speed < 10) {
-          setTrafficStatus("🟡 Trânsito moderado");
-        } else {
-          setTrafficStatus("🟢 Trânsito livre");
-        }
+        userMarkerRef.current = new googleApi.maps.Marker({
+          position: center,
+          map,
+          title: "Você",
+          icon: {
+            path: googleApi.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+            scale: 6,
+            fillColor: "#22c55e",
+            fillOpacity: 1,
+            strokeColor: "#dcfce7",
+            strokeWeight: 2,
+            rotation: 0,
+          },
+          zIndex: 10,
+        });
 
-        if (parsedInstructions.length > 0) {
-          speak(parsedInstructions[0]);
-        }
+        directionsRendererRef.current = new googleApi.maps.DirectionsRenderer({
+          map,
+          suppressMarkers: true,
+          preserveViewport: true,
+          polylineOptions: {
+            strokeColor: "#22c55e",
+            strokeOpacity: 0.95,
+            strokeWeight: 6,
+          },
+        });
 
-      } catch (err) {
-        console.log("Erro rota:", err);
+        infoWindowRef.current = new googleApi.maps.InfoWindow();
+
+        setMapReady(true);
+        setErrorMessage("");
+      } catch (error) {
+        console.error("Erro ao iniciar Google Maps:", error);
+        setErrorMessage("Não foi possível carregar o Google Maps.");
       }
     }
 
-    loadRoute();
-  }, [location, destination]);
+    initMap();
 
-  if (!location) return null;
+    return () => {
+      mounted = false;
+    };
+  }, [location]);
+
+  useEffect(() => {
+    if (!mapReady || !location || !googleMapRef.current || !window.google) return;
+
+    const map = googleMapRef.current;
+    const googleApi = window.google;
+
+    const current = {
+      lat: location.latitude,
+      lng: location.longitude,
+    };
+
+    if (!lastLocationRef.current) {
+      lastLocationRef.current = {
+        latitude: location.latitude,
+        longitude: location.longitude,
+      };
+    } else {
+      const bearing = getBearing(
+        lastLocationRef.current.latitude,
+        lastLocationRef.current.longitude,
+        location.latitude,
+        location.longitude
+      );
+
+      const smooth = smoothRotation(lastRotationRef.current, bearing);
+
+      setRotation(smooth);
+      lastRotationRef.current = smooth;
+      lastLocationRef.current = {
+        latitude: location.latitude,
+        longitude: location.longitude,
+      };
+
+      map.setHeading(smooth);
+
+      if (userMarkerRef.current) {
+        userMarkerRef.current.setIcon({
+          path: googleApi.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+          scale: 6,
+          fillColor: "#22c55e",
+          fillOpacity: 1,
+          strokeColor: "#dcfce7",
+          strokeWeight: 2,
+          rotation: smooth,
+        });
+      }
+    }
+
+    if (userMarkerRef.current) {
+      userMarkerRef.current.setPosition(current);
+    }
+
+    const offsetDistance = 0.0007;
+    const targetCenter = {
+      lat: current.lat + offsetDistance,
+      lng: current.lng,
+    };
+
+    map.panTo(targetCenter);
+    map.setZoom(19);
+    map.setTilt(45);
+  }, [location, mapReady]);
+
+  useEffect(() => {
+    if (
+      !mapReady ||
+      !location ||
+      !destination ||
+      !window.google ||
+      !googleMapRef.current ||
+      !directionsRendererRef.current
+    ) {
+      return;
+    }
+
+    const googleApi = window.google;
+    const map = googleMapRef.current;
+
+    if (!destinationMarkerRef.current) {
+      destinationMarkerRef.current = new googleApi.maps.Marker({
+        position: {
+          lat: destination.latitude,
+          lng: destination.longitude,
+        },
+        map,
+        title: destination.name || "Destino",
+      });
+    } else {
+      destinationMarkerRef.current.setPosition({
+        lat: destination.latitude,
+        lng: destination.longitude,
+      });
+      destinationMarkerRef.current.setMap(map);
+    }
+
+    const directionsService = new googleApi.maps.DirectionsService();
+
+    directionsService.route(
+      {
+        origin: {
+          lat: location.latitude,
+          lng: location.longitude,
+        },
+        destination: {
+          lat: destination.latitude,
+          lng: destination.longitude,
+        },
+        travelMode: googleApi.maps.TravelMode.DRIVING,
+        drivingOptions: {
+          departureTime: new Date(),
+          trafficModel: googleApi.maps.TrafficModel.BEST_GUESS,
+        },
+      },
+      (result, status) => {
+        if (status === "OK" && result) {
+          directionsRendererRef.current?.setDirections(result);
+
+          const leg = result.routes?.[0]?.legs?.[0];
+          if (leg) {
+            setDistanceLeft(leg.distance?.text || "--");
+            setEta(leg.duration_in_traffic?.text || leg.duration?.text || "--");
+
+            if (infoWindowRef.current && destinationMarkerRef.current) {
+              infoWindowRef.current.setContent(
+                `<div style="font-size:14px;"><strong>${
+                  destination.name || "Destino"
+                }</strong><br/>Distância: ${leg.distance?.text || "--"}<br/>ETA: ${
+                  leg.duration_in_traffic?.text || leg.duration?.text || "--"
+                }</div>`
+              );
+            }
+          }
+
+          setErrorMessage("");
+        } else {
+          console.error("Erro ao calcular rota no Google Maps:", status);
+          setErrorMessage("Não foi possível calcular a rota no Google Maps.");
+        }
+      }
+    );
+  }, [destination, location, mapReady]);
 
   return (
-    <div>
-
-      {/* STATUS DO TRÂNSITO */}
-      {trafficStatus && (
-        <div style={{
-          background: "#111827",
-          padding: 10,
-          marginBottom: 10,
-          borderRadius: 8,
-          textAlign: "center",
-          fontWeight: "bold"
-        }}>
-          {trafficStatus}
-        </div>
-      )}
-
-      <MapContainer
-        center={[location.latitude, location.longitude]}
-        zoom={15}
-        style={{ height: 350, width: "100%", borderRadius: 12 }}
+    <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      <div
+        style={{
+          position: "absolute",
+          top: 16,
+          left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 1002,
+          background: "rgba(17,24,39,0.92)",
+          color: "#fff",
+          padding: "10px 16px",
+          borderRadius: 12,
+          display: "flex",
+          gap: 18,
+          alignItems: "center",
+          boxShadow: "0 8px 30px rgba(0,0,0,0.35)",
+          fontWeight: 700,
+          backdropFilter: "blur(8px)",
+        }}
       >
-        <TileLayer
-          attribution="© OpenStreetMap"
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-        />
+        <span>📍 {distanceLeft}</span>
+        <span>⏱️ {eta}</span>
+        <span>🧭 {Math.round(rotation)}°</span>
+      </div>
 
-        <Marker position={[location.latitude, location.longitude]}>
-          <Popup>Você</Popup>
-        </Marker>
-
-        {destination && (
-          <Marker position={[destination.latitude, destination.longitude]}>
-            <Popup>{destination.name}</Popup>
-          </Marker>
-        )}
-
-        {radar && (
-          <Marker position={[radar.latitude, radar.longitude]}>
-            <Popup>🚨 Radar</Popup>
-          </Marker>
-        )}
-
-        {route.length > 0 && <Polyline positions={route} />}
-      </MapContainer>
-
-      {/* INSTRUÇÃO */}
-      {instructions.length > 0 && (
+      {errorMessage && (
         <div
           style={{
-            background: "#111827",
-            marginTop: 10,
-            padding: 12,
-            borderRadius: 8,
-            textAlign: "center",
-            fontWeight: "bold",
+            position: "absolute",
+            top: 72,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1002,
+            background: "rgba(127,29,29,0.95)",
+            color: "#fff",
+            padding: "8px 12px",
+            borderRadius: 10,
+            fontSize: 13,
+            fontWeight: 600,
           }}
         >
-          {instructions[0]}
+          {errorMessage}
         </div>
       )}
+
+      {!GOOGLE_MAPS_API_KEY && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 1003,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#111827",
+            color: "#fff",
+            padding: 24,
+            textAlign: "center",
+            fontWeight: 700,
+          }}
+        >
+          Configure VITE_GOOGLE_MAPS_API_KEY no frontend para usar o Google Maps.
+        </div>
+      )}
+
+      <div
+        ref={mapRef}
+        style={{
+          width: "100%",
+          height: "100%",
+        }}
+      />
     </div>
   );
 }
