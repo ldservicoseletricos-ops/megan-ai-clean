@@ -185,6 +185,32 @@ function isWeatherRequest(message) {
   ].some((term) => normalized.includes(normalizeText(term)));
 }
 
+function isLocationQuestion(message) {
+  const normalized = normalizeText(message);
+
+  return [
+    "onde estou",
+    "onde eu estou",
+    "minha localizacao",
+    "minha localização",
+    "qual minha localizacao",
+    "qual minha localização",
+    "qual a minha localizacao",
+    "qual a minha localização",
+    "minha posicao",
+    "minha posição",
+    "qual minha posicao",
+    "qual minha posição",
+    "qual a minha posicao",
+    "qual a minha posição",
+    "onde to",
+    "onde tô",
+    "onde estou agora",
+    "minha localizacao atual",
+    "minha localização atual",
+  ].some((term) => normalized.includes(normalizeText(term)));
+}
+
 function normalizeLocationPayload(deviceLocation) {
   if (!deviceLocation || typeof deviceLocation !== "object") return null;
 
@@ -292,6 +318,64 @@ function buildWeatherReply(weather) {
     `Condição: ${weather.weatherText}\n` +
     `Umidade: ${weather.humidity}%\n` +
     `Vento: ${weather.windSpeed} km/h`
+  );
+}
+
+async function getAddressFromCoords(latitude, longitude) {
+  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+
+  if (!googleMapsApiKey) {
+    console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
+    return null;
+  }
+
+  try {
+    const url =
+      `https://maps.googleapis.com/maps/api/geocode/json` +
+      `?latlng=${encodeURIComponent(latitude)},${encodeURIComponent(longitude)}` +
+      `&key=${encodeURIComponent(googleMapsApiKey)}` +
+      `&region=br` +
+      `&language=pt-BR`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (
+      data?.status === "OK" &&
+      Array.isArray(data.results) &&
+      data.results.length > 0
+    ) {
+      return data.results[0]?.formatted_address || null;
+    }
+
+    console.log("⚠️ Reverse geocoding sem resultado:", data?.status);
+    return null;
+  } catch (error) {
+    console.error("❌ Erro reverse geocoding:", error);
+    return null;
+  }
+}
+
+function buildLocationReply(address, location) {
+  const latitude = Number(location.latitude).toFixed(6);
+  const longitude = Number(location.longitude).toFixed(6);
+  const accuracy =
+    typeof location.accuracy === "number"
+      ? `${Math.round(location.accuracy)} m`
+      : "N/A";
+
+  if (address) {
+    return (
+      `📍 Você está próximo de:\n${address}\n\n` +
+      `🌍 Coordenadas:\n${latitude}, ${longitude}\n\n` +
+      `📡 Precisão aproximada: ${accuracy}`
+    );
+  }
+
+  return (
+    `📍 Recebi sua localização atual.\n\n` +
+    `🌍 Coordenadas:\n${latitude}, ${longitude}\n\n` +
+    `📡 Precisão aproximada: ${accuracy}`
   );
 }
 
@@ -799,6 +883,25 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
+    if (isLocationQuestion(text)) {
+      if (!normalizedLocation) {
+        return res.json({
+          ok: true,
+          reply: "Para informar onde você está, preciso da localização atual do aparelho.",
+        });
+      }
+
+      const address = await getAddressFromCoords(
+        normalizedLocation.latitude,
+        normalizedLocation.longitude
+      );
+
+      return res.json({
+        ok: true,
+        reply: buildLocationReply(address, normalizedLocation),
+      });
+    }
+
     if (isCancelNavigationRequest(text)) {
       clearActiveNavigation();
 
@@ -1077,135 +1180,4 @@ app.use("/api/navigation", navigationRouter);
 ========================= */
 app.listen(PORT, () => {
   console.log("🚀 Megan OS rodando na porta", PORT);
-});import express from "express";
-import cors from "cors";
-import dotenv from "dotenv";
-import fetch from "node-fetch";
-import { GoogleGenAI } from "@google/genai";
-
-dotenv.config();
-
-const app = express();
-const PORT = process.env.PORT || 10000;
-
-/* =========================
-   ENV
-========================= */
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || "";
-
-/* =========================
-   AI
-========================= */
-const ai = GEMINI_API_KEY
-  ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
-  : null;
-
-/* =========================
-   MIDDLEWARE
-========================= */
-app.use(cors());
-app.use(express.json());
-
-/* =========================
-   HEALTH
-========================= */
-app.get("/api/health", (req, res) => {
-  res.json({
-    ok: true,
-    app: "Megan OS Backend",
-    status: "online",
-    time: new Date().toISOString(),
-  });
-});
-
-/* =========================
-   FUNÇÃO: DETECTAR "ONDE ESTOU"
-========================= */
-function isLocationQuestion(message) {
-  const text = message.toLowerCase();
-
-  return (
-    text.includes("onde estou") ||
-    text.includes("onde eu estou") ||
-    text.includes("minha localização") ||
-    text.includes("qual minha localização") ||
-    text.includes("minha posição")
-  );
-}
-
-/* =========================
-   FUNÇÃO: GEOCODING
-========================= */
-async function getAddressFromCoords(lat, lng) {
-  try {
-    const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${GOOGLE_MAPS_API_KEY}`;
-
-    const response = await fetch(url);
-    const data = await response.json();
-
-    if (data.status === "OK") {
-      return data.results[0]?.formatted_address || "Local desconhecido";
-    }
-
-    return "Não foi possível obter endereço";
-  } catch (err) {
-    console.error("Erro geocoding:", err);
-    return "Erro ao buscar endereço";
-  }
-}
-
-/* =========================
-   CHAT
-========================= */
-app.post("/api/chat", async (req, res) => {
-  try {
-    const { message, deviceLocation } = req.body;
-
-    /* =========================
-       LOCALIZAÇÃO REAL
-    ========================= */
-    if (isLocationQuestion(message) && deviceLocation) {
-      const { latitude, longitude, accuracy } = deviceLocation;
-
-      const address = await getAddressFromCoords(latitude, longitude);
-
-      return res.json({
-        reply: `📍 Você está próximo de:\n${address}\n\n🌍 Coordenadas:\n${latitude}, ${longitude}\n\n📡 Precisão aproximada: ${accuracy || "N/A"} metros`,
-      });
-    }
-
-    /* =========================
-       GEMINI NORMAL
-    ========================= */
-    if (!ai) {
-      return res.json({
-        reply: "IA não configurada.",
-      });
-    }
-
-    const response = await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: [{ role: "user", parts: [{ text: message }] }],
-    });
-
-    const text =
-      response?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "Não consegui responder.";
-
-    res.json({ reply: text });
-  } catch (err) {
-    console.error("Erro chat:", err);
-    res.status(500).json({
-      reply: "Erro interno no servidor.",
-    });
-  }
-});
-
-/* =========================
-   START
-========================= */
-app.listen(PORT, () => {
-  console.log(`🚀 Megan OS rodando na porta ${PORT}`);
 });
