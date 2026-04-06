@@ -21,6 +21,7 @@ type MapViewProps = {
     latitude: number;
     longitude: number;
     speed?: number | null;
+    accuracy?: number | null;
   } | null;
   destination?: {
     latitude: number;
@@ -177,6 +178,15 @@ function flattenOverviewPath(route: google.maps.DirectionsRoute): LatLngPoint[] 
   }));
 }
 
+function buildRoutePolyline(
+  google: typeof window.google,
+  routePath: LatLngPoint[]
+) {
+  return new google.maps.Polyline({
+    path: routePath,
+  });
+}
+
 function isPointOnRoute(
   google: typeof window.google,
   point: LatLngPoint,
@@ -185,15 +195,33 @@ function isPointOnRoute(
 ) {
   if (!routePath.length || !google.maps.geometry?.poly) return false;
 
-  const polyline = new google.maps.Polyline({
-    path: routePath,
-  });
+  const polyline = buildRoutePolyline(google, routePath);
 
   return google.maps.geometry.poly.isLocationOnEdge(
     new google.maps.LatLng(point.lat, point.lng),
     polyline,
     toleranceMeters / 6378137
   );
+}
+
+function getDynamicToleranceMeters(
+  speed?: number | null,
+  accuracy?: number | null
+) {
+  const speedKmh =
+    typeof speed === "number" && !Number.isNaN(speed) ? speed * 3.6 : 0;
+
+  let tolerance = 28;
+
+  if (speedKmh >= 20) tolerance = 35;
+  if (speedKmh >= 50) tolerance = 45;
+  if (speedKmh >= 80) tolerance = 55;
+
+  if (typeof accuracy === "number" && !Number.isNaN(accuracy)) {
+    tolerance = Math.max(tolerance, Math.min(accuracy * 1.4, 80));
+  }
+
+  return tolerance;
 }
 
 export default function MapView({
@@ -212,9 +240,8 @@ export default function MapView({
   const navigationReadyRef = useRef(false);
 
   const lastRouteAtRef = useRef(0);
-  const lastOffRouteAtRef = useRef(0);
+  const offRouteStartedAtRef = useRef<number | null>(null);
 
-  const lastRouteOriginRef = useRef<LatLngPoint | null>(null);
   const lastRouteDestinationRef = useRef<LatLngPoint | null>(null);
 
   const routePathRef = useRef<LatLngPoint[]>([]);
@@ -224,6 +251,9 @@ export default function MapView({
   const lastLocationForHeadingRef = useRef<LatLngPoint | null>(null);
   const headingRef = useRef(0);
   const markerHeadingRef = useRef(0);
+
+  const lastConfirmedOnRouteRef = useRef<LatLngPoint | null>(null);
+  const offRouteSampleCountRef = useRef(0);
 
   const [mapReady, setMapReady] = useState(false);
   const [loadingMap, setLoadingMap] = useState(true);
@@ -326,6 +356,7 @@ export default function MapView({
 
         animatedCenterRef.current = center;
         lastLocationForHeadingRef.current = center;
+        lastConfirmedOnRouteRef.current = center;
         initializedRef.current = true;
         setMapReady(true);
         setLoadingMap(false);
@@ -393,7 +424,9 @@ export default function MapView({
 
     if (originMarkerRef.current) {
       originMarkerRef.current.setPosition(current);
-      originMarkerRef.current.setIcon(getCarSymbol(google, markerHeadingRef.current));
+      originMarkerRef.current.setIcon(
+        getCarSymbol(google, markerHeadingRef.current)
+      );
     }
 
     const map = mapObj.current;
@@ -506,12 +539,12 @@ export default function MapView({
     const google = window.google;
     const now = Date.now();
 
-    const currentOrigin = {
+    const currentOrigin: LatLngPoint = {
       lat: location.latitude,
       lng: location.longitude,
     };
 
-    const currentDestination = {
+    const currentDestination: LatLngPoint = {
       lat: destination.latitude,
       lng: destination.longitude,
     };
@@ -527,41 +560,84 @@ export default function MapView({
       : Number.MAX_SAFE_INTEGER;
 
     const hasRoute = routePathRef.current.length > 0;
+    const routeNotLoaded = !navigationReadyRef.current || !hasRoute;
 
-    let offRoute = false;
-    if (hasRoute) {
-      const toleranceMeters =
-        typeof location.speed === "number" && location.speed * 3.6 > 50 ? 45 : 30;
+    let shouldRecalculate = false;
 
-      offRoute = !isPointOnRoute(
+    if (routeNotLoaded) {
+      shouldRecalculate = true;
+    }
+
+    if (destinationMoved >= 5) {
+      shouldRecalculate = true;
+    }
+
+    if (hasRoute && !shouldRecalculate) {
+      const toleranceMeters = getDynamicToleranceMeters(
+        location.speed,
+        location.accuracy
+      );
+
+      const onRoute = isPointOnRoute(
         google,
         currentOrigin,
         routePathRef.current,
         toleranceMeters
       );
+
+      if (onRoute) {
+        offRouteStartedAtRef.current = null;
+        offRouteSampleCountRef.current = 0;
+        lastConfirmedOnRouteRef.current = currentOrigin;
+      } else {
+        if (!offRouteStartedAtRef.current) {
+          offRouteStartedAtRef.current = now;
+          offRouteSampleCountRef.current = 1;
+        } else {
+          offRouteSampleCountRef.current += 1;
+        }
+
+        const offRouteDuration = now - offRouteStartedAtRef.current;
+        const referencePoint = lastConfirmedOnRouteRef.current;
+        const driftFromLastGoodPoint = referencePoint
+          ? calculateDistanceMeters(
+              referencePoint.lat,
+              referencePoint.lng,
+              currentOrigin.lat,
+              currentOrigin.lng
+            )
+          : 0;
+
+        const minDurationMs =
+          typeof location.speed === "number" && location.speed * 3.6 > 50
+            ? 3500
+            : 4500;
+
+        const minSamples = 3;
+        const minDriftMeters =
+          typeof location.accuracy === "number" && !Number.isNaN(location.accuracy)
+            ? Math.max(30, location.accuracy * 1.3)
+            : 35;
+
+        const confirmedOffRoute =
+          offRouteDuration >= minDurationMs &&
+          offRouteSampleCountRef.current >= minSamples &&
+          driftFromLastGoodPoint >= minDriftMeters;
+
+        if (confirmedOffRoute) {
+          const cooldownPassed = now - lastRouteAtRef.current >= 9000;
+          if (cooldownPassed) {
+            shouldRecalculate = true;
+          }
+        }
+      }
     }
-
-    if (offRoute) {
-      lastOffRouteAtRef.current = now;
-    }
-
-    const destinationChanged = destinationMoved >= 5;
-    const routeNotLoaded = !navigationReadyRef.current || !hasRoute;
-
-    const recentlyOffRoute = now - lastOffRouteAtRef.current < 12000;
-    const cooldownPassed = now - lastRouteAtRef.current >= 9000;
-
-    const shouldRecalculate =
-      routeNotLoaded ||
-      destinationChanged ||
-      (recentlyOffRoute && cooldownPassed);
 
     if (!shouldRecalculate) {
       return;
     }
 
     lastRouteAtRef.current = now;
-    lastRouteOriginRef.current = currentOrigin;
     lastRouteDestinationRef.current = currentDestination;
 
     const directionsService = new google.maps.DirectionsService();
@@ -613,12 +689,12 @@ export default function MapView({
           destinationMarkerRef.current.setMap(mapObj.current);
         }
 
-        if (!navigationReadyRef.current || routeNotLoaded) {
-          focusNavigationCamera(currentOrigin, headingRef.current, location.speed);
-        }
+        focusNavigationCamera(currentOrigin, headingRef.current, location.speed);
 
         navigationReadyRef.current = true;
-        lastOffRouteAtRef.current = 0;
+        offRouteStartedAtRef.current = null;
+        offRouteSampleCountRef.current = 0;
+        lastConfirmedOnRouteRef.current = currentOrigin;
 
         const steps: Step[] = bestLeg.steps.map((step) => ({
           instruction: step.instructions.replace(/<[^>]+>/g, ""),
@@ -637,12 +713,15 @@ export default function MapView({
     if (!destination) {
       navigationReadyRef.current = false;
       lastRouteAtRef.current = 0;
-      lastOffRouteAtRef.current = 0;
-      lastRouteOriginRef.current = null;
+      offRouteStartedAtRef.current = null;
+      offRouteSampleCountRef.current = 0;
       lastRouteDestinationRef.current = null;
       routePathRef.current = [];
       animatedCenterRef.current = null;
       lastLocationForHeadingRef.current = location
+        ? { lat: location.latitude, lng: location.longitude }
+        : null;
+      lastConfirmedOnRouteRef.current = location
         ? { lat: location.latitude, lng: location.longitude }
         : null;
       headingRef.current = 0;

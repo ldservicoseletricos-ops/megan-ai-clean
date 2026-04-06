@@ -99,6 +99,93 @@ function calculateDistanceMeters(
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
+function getSpeedKmh(speed?: number | null) {
+  if (typeof speed !== "number" || Number.isNaN(speed)) return 0;
+  return Math.max(0, speed * 3.6);
+}
+
+function isValidCoordinate(value: number) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isReasonableLocation(loc: DeviceLocation) {
+  return (
+    isValidCoordinate(loc.latitude) &&
+    isValidCoordinate(loc.longitude) &&
+    Math.abs(loc.latitude) <= 90 &&
+    Math.abs(loc.longitude) <= 180
+  );
+}
+
+function shouldAcceptLocationUpdate(
+  previous: DeviceLocation | null,
+  next: DeviceLocation,
+  timeDiffMs: number
+) {
+  if (!isReasonableLocation(next)) return false;
+
+  const nextAccuracy =
+    typeof next.accuracy === "number" && !Number.isNaN(next.accuracy)
+      ? next.accuracy
+      : 9999;
+
+  if (nextAccuracy > 120) {
+    return false;
+  }
+
+  if (!previous) {
+    return true;
+  }
+
+  const prevAccuracy =
+    typeof previous.accuracy === "number" && !Number.isNaN(previous.accuracy)
+      ? previous.accuracy
+      : 9999;
+
+  const distance = calculateDistanceMeters(
+    previous.latitude,
+    previous.longitude,
+    next.latitude,
+    next.longitude
+  );
+
+  const nextSpeedKmh = getSpeedKmh(next.speed);
+  const prevSpeedKmh = getSpeedKmh(previous.speed);
+
+  const effectiveTimeSec = Math.max(1, timeDiffMs / 1000);
+  const impliedSpeedKmh = (distance / effectiveTimeSec) * 3.6;
+
+  if (distance < 2 && nextAccuracy >= prevAccuracy - 3) {
+    return false;
+  }
+
+  if (impliedSpeedKmh > 220 && nextSpeedKmh < 130) {
+    return false;
+  }
+
+  if (distance > 60 && nextAccuracy > prevAccuracy + 20 && nextSpeedKmh < 15) {
+    return false;
+  }
+
+  if (nextAccuracy + 8 < prevAccuracy) {
+    return true;
+  }
+
+  if (distance >= 4) {
+    return true;
+  }
+
+  if (nextSpeedKmh >= 8 && prevSpeedKmh < 8) {
+    return true;
+  }
+
+  if (Math.abs(nextSpeedKmh - prevSpeedKmh) >= 10) {
+    return true;
+  }
+
+  return false;
+}
+
 export default function App() {
   const [status, setStatus] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -117,6 +204,7 @@ export default function App() {
   const debounceRef = useRef<number | null>(null);
   const sessionTokenRef = useRef(generateSessionToken());
   const lastAcceptedLocationRef = useRef<DeviceLocation | null>(null);
+  const lastAcceptedAtRef = useRef(0);
 
   useEffect(() => {
     checkHealth().then(() => setStatus("Online")).catch(() => setStatus("Offline"));
@@ -142,29 +230,18 @@ export default function App() {
       return;
     }
 
-    const acceptLocation = (nextLoc: DeviceLocation) => {
+    const acceptLocation = (nextLoc: DeviceLocation, force = false) => {
+      const now = Date.now();
       const previous = lastAcceptedLocationRef.current;
+      const timeDiffMs = previous ? now - lastAcceptedAtRef.current : 0;
 
-      if (!previous) {
-        lastAcceptedLocationRef.current = nextLoc;
-        setDeviceLocation(nextLoc);
+      if (!force && !shouldAcceptLocationUpdate(previous, nextLoc, timeDiffMs)) {
         return;
       }
 
-      const moved = calculateDistanceMeters(
-        previous.latitude,
-        previous.longitude,
-        nextLoc.latitude,
-        nextLoc.longitude
-      );
-
-      const prevAccuracy = previous.accuracy ?? 9999;
-      const nextAccuracy = nextLoc.accuracy ?? 9999;
-
-      if (moved >= 3 || nextAccuracy < prevAccuracy) {
-        lastAcceptedLocationRef.current = nextLoc;
-        setDeviceLocation(nextLoc);
-      }
+      lastAcceptedLocationRef.current = nextLoc;
+      lastAcceptedAtRef.current = now;
+      setDeviceLocation(nextLoc);
     };
 
     navigator.geolocation.getCurrentPosition(
@@ -172,12 +249,18 @@ export default function App() {
         const loc: DeviceLocation = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy ?? null,
-          speed: pos.coords.speed ?? null,
+          accuracy:
+            typeof pos.coords.accuracy === "number"
+              ? pos.coords.accuracy
+              : null,
+          speed:
+            typeof pos.coords.speed === "number" ? pos.coords.speed : null,
         };
 
         console.log("LOCALIZAÇÃO INICIAL:", loc);
-        acceptLocation(loc);
+        if (isReasonableLocation(loc)) {
+          acceptLocation(loc, true);
+        }
       },
       (error) => {
         console.log("Erro localização inicial:", error);
@@ -194,8 +277,12 @@ export default function App() {
         const loc: DeviceLocation = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy ?? null,
-          speed: pos.coords.speed ?? null,
+          accuracy:
+            typeof pos.coords.accuracy === "number"
+              ? pos.coords.accuracy
+              : null,
+          speed:
+            typeof pos.coords.speed === "number" ? pos.coords.speed : null,
         };
 
         console.log("LOCALIZAÇÃO ATUALIZADA:", loc);
