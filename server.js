@@ -110,6 +110,8 @@ function isWeatherRequest(message) {
     "como esta o clima",
     "como está o clima",
     "qual o clima",
+    "como está o tempo",
+    "como esta o tempo",
   ].some((term) => normalized.includes(normalizeText(term)));
 }
 
@@ -144,16 +146,25 @@ function weatherCodeToText(code) {
     51: "garoa leve",
     53: "garoa moderada",
     55: "garoa intensa",
+    56: "garoa congelante leve",
+    57: "garoa congelante intensa",
     61: "chuva leve",
     63: "chuva moderada",
     65: "chuva forte",
+    66: "chuva congelante leve",
+    67: "chuva congelante forte",
     71: "neve leve",
     73: "neve moderada",
     75: "neve forte",
+    77: "grãos de neve",
     80: "pancadas de chuva leves",
     81: "pancadas de chuva moderadas",
     82: "pancadas de chuva fortes",
+    85: "pancadas de neve leves",
+    86: "pancadas de neve fortes",
     95: "trovoadas",
+    96: "trovoadas com granizo leve",
+    99: "trovoadas com granizo forte",
   };
 
   return map[code] || "condição não identificada";
@@ -165,10 +176,10 @@ async function getWeatherFromCoords(latitude, longitude) {
       `https://api.open-meteo.com/v1/forecast` +
       `?latitude=${encodeURIComponent(latitude)}` +
       `&longitude=${encodeURIComponent(longitude)}` +
-      `&current_weather=true` +
+      `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m` +
       `&timezone=auto`;
 
-    console.log("🌤️ Consultando clima:", { latitude, longitude, url });
+    console.log("🌤️ Consultando clima:", { latitude, longitude });
 
     const res = await fetch(url, {
       headers: {
@@ -183,24 +194,37 @@ async function getWeatherFromCoords(latitude, longitude) {
     }
 
     const data = await res.json();
-    const current = data?.current_weather;
+    const current = data?.current;
 
     if (!current) {
-      console.error("❌ Open-Meteo sem current_weather:", data);
+      console.error("❌ Open-Meteo sem current:", data);
       return null;
     }
 
     return {
-      temperature: current.temperature,
-      windSpeed: current.windspeed,
-      weatherCode: current.weathercode,
-      weatherText: weatherCodeToText(current.weathercode),
+      temperature: current.temperature_2m,
+      feelsLike: current.apparent_temperature,
+      windSpeed: current.wind_speed_10m,
+      humidity: current.relative_humidity_2m,
+      weatherCode: current.weather_code,
+      weatherText: weatherCodeToText(current.weather_code),
       time: current.time || null,
     };
   } catch (err) {
     console.error("❌ Erro clima:", err);
     return null;
   }
+}
+
+function buildWeatherReply(weather) {
+  return (
+    `🌤️ Clima agora no seu local:\n` +
+    `Temperatura: ${weather.temperature}°C\n` +
+    `Sensação térmica: ${weather.feelsLike}°C\n` +
+    `Condição: ${weather.weatherText}\n` +
+    `Umidade: ${weather.humidity}%\n` +
+    `Vento: ${weather.windSpeed} km/h`
+  );
 }
 
 function getKnownDestination(query) {
@@ -307,7 +331,6 @@ app.post("/api/chat", async (req, res) => {
 
     console.log("📩 /api/chat recebida:", {
       message,
-      deviceLocation,
       normalizedLocation,
     });
 
@@ -357,11 +380,7 @@ app.post("/api/chat", async (req, res) => {
       if (weather) {
         return res.json({
           ok: true,
-          reply:
-            `🌤️ Clima agora no seu local:\n` +
-            `Temperatura: ${weather.temperature}°C\n` +
-            `Condição: ${weather.weatherText}\n` +
-            `Vento: ${weather.windSpeed} km/h`,
+          reply: buildWeatherReply(weather),
         });
       }
 
