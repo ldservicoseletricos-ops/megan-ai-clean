@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 declare global {
   interface Window {
@@ -63,7 +63,11 @@ function loadGoogleMapsScript(): Promise<typeof google> {
   });
 }
 
-export default function MapView({ location, destination, onStepsUpdate }: MapViewProps) {
+export default function MapView({
+  location,
+  destination,
+  onStepsUpdate,
+}: MapViewProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const mapObj = useRef<google.maps.Map | null>(null);
   const directionsRenderer = useRef<google.maps.DirectionsRenderer | null>(null);
@@ -73,6 +77,8 @@ export default function MapView({ location, destination, onStepsUpdate }: MapVie
 
   const lastRouteUpdateRef = useRef(0);
   const initializedRef = useRef(false);
+
+  const [mapReady, setMapReady] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,6 +128,7 @@ export default function MapView({ location, destination, onStepsUpdate }: MapVie
         });
 
         initializedRef.current = true;
+        setMapReady(true);
       } catch (error) {
         console.error("Erro ao iniciar Google Maps:", error);
       }
@@ -150,13 +157,19 @@ export default function MapView({ location, destination, onStepsUpdate }: MapVie
   }, [location]);
 
   useEffect(() => {
-    if (!location || !destination || !window.google || !mapObj.current || !directionsRenderer.current) {
+    if (
+      !mapReady ||
+      !location ||
+      !destination ||
+      !window.google ||
+      !mapObj.current ||
+      !directionsRenderer.current
+    ) {
       return;
     }
 
     const now = Date.now();
 
-    // evita recalcular a rota em excesso
     if (now - lastRouteUpdateRef.current < 3000) {
       return;
     }
@@ -188,7 +201,6 @@ export default function MapView({ location, destination, onStepsUpdate }: MapVie
           return;
         }
 
-        // escolhe automaticamente a rota mais rápida
         let bestRoute = result.routes[0];
         let bestDuration =
           result.routes[0].legs?.[0]?.duration_in_traffic?.value ??
@@ -241,7 +253,7 @@ export default function MapView({ location, destination, onStepsUpdate }: MapVie
         }
       }
     );
-  }, [location, destination, onStepsUpdate]);
+  }, [mapReady, location, destination, onStepsUpdate]);
 
   return (
     <div
