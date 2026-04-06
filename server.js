@@ -659,166 +659,6 @@ async function geocodeDestination(query) {
   return null;
 }
 
-function buildLocalSuggestionCandidates(input) {
-  const normalizedInput = normalizeText(input);
-  const localCandidates = [];
-
-  for (const item of favoriteDestinations) {
-    localCandidates.push({
-      text: `${item.label} — ${item.address}`,
-      placeId: "",
-      type: "favorite",
-    });
-    localCandidates.push({
-      text: item.address,
-      placeId: "",
-      type: "favorite",
-    });
-    localCandidates.push({
-      text: item.label,
-      placeId: "",
-      type: "favorite",
-    });
-  }
-
-  for (const item of recentDestinations) {
-    localCandidates.push({
-      text: item.name,
-      placeId: "",
-      type: "recent",
-    });
-  }
-
-  localCandidates.push(
-    {
-      text: "Praça da Moça, Centro, Diadema - SP",
-      placeId: "",
-      type: "google",
-    },
-    {
-      text: "Rua Presidente Wenceslau, Eldorado, Diadema - SP, Brasil",
-      placeId: "",
-      type: "google",
-    }
-  );
-
-  const filtered = localCandidates.filter((item) => {
-    const normalizedText = normalizeText(item.text);
-    return (
-      normalizedText.includes(normalizedInput) ||
-      normalizedInput.includes(normalizedText)
-    );
-  });
-
-  const unique = [];
-  const seen = new Set();
-
-  for (const item of filtered) {
-    const key = normalizeText(item.text);
-    if (!seen.has(key)) {
-      seen.add(key);
-      unique.push(item);
-    }
-  }
-
-  return unique.slice(0, 8);
-}
-
-/* =========================
-   AUTOCOMPLETE GOOGLE PLACES
-========================= */
-async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionToken) {
-  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
-  const cleanedInput = String(input || "").trim();
-
-  if (cleanedInput.length < 2) return [];
-
-  const localFallback = buildLocalSuggestionCandidates(cleanedInput);
-
-  if (!googleMapsApiKey) {
-    console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
-    return localFallback;
-  }
-
-  const body = {
-    input: cleanedInput,
-    languageCode: "pt-BR",
-    regionCode: "BR",
-    includedRegionCodes: ["br"],
-    sessionToken: sessionToken || undefined,
-    includeQueryPredictions: false,
-  };
-
-  const normalizedLocation = normalizeLocationPayload(deviceLocation);
-
-  if (normalizedLocation) {
-    body.locationBias = {
-      circle: {
-        center: {
-          latitude: normalizedLocation.latitude,
-          longitude: normalizedLocation.longitude,
-        },
-        radius: 50000,
-      },
-    };
-  }
-
-  try {
-    const res = await fetch("https://places.googleapis.com/v1/places:autocomplete", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Goog-Api-Key": googleMapsApiKey,
-        "X-Goog-FieldMask":
-          "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text",
-      },
-      body: JSON.stringify(body),
-    });
-
-    const data = await res.json();
-
-    if (!res.ok) {
-      console.error("❌ Places Autocomplete HTTP ERROR:", res.status, data);
-      return localFallback;
-    }
-
-    const googleSuggestions = Array.isArray(data?.suggestions)
-      ? data.suggestions
-          .map((item) => {
-            const prediction = item?.placePrediction;
-            const text = prediction?.text?.text || "";
-            const placeId = prediction?.placeId || "";
-
-            if (!text) return null;
-
-            return {
-              text,
-              placeId,
-              type: "google",
-            };
-          })
-          .filter(Boolean)
-      : [];
-
-    const merged = [...localFallback, ...googleSuggestions];
-    const unique = [];
-    const seen = new Set();
-
-    for (const item of merged) {
-      const key = normalizeText(item.text);
-      if (!seen.has(key)) {
-        seen.add(key);
-        unique.push(item);
-      }
-    }
-
-    return unique.slice(0, 8);
-  } catch (error) {
-    console.error("❌ Erro autocomplete Google Places:", error);
-    return localFallback;
-  }
-}
-
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -859,6 +699,232 @@ function buildDistanceEtaReply(deviceLocation, destination) {
     eta,
     reply: `📍 Destino atual: ${destination.name}\nDistância aproximada: ${distance}\nTempo estimado: ${eta}`,
   };
+}
+
+function buildLocalSuggestionCandidates(input) {
+  const normalizedInput = normalizeText(input);
+  const localCandidates = [];
+
+  for (const item of favoriteDestinations) {
+    localCandidates.push({
+      text: `${item.label} — ${item.address}`,
+      placeId: "",
+      type: "favorite",
+      address: item.address,
+    });
+
+    localCandidates.push({
+      text: item.label,
+      placeId: "",
+      type: "favorite",
+      address: item.address,
+    });
+
+    localCandidates.push({
+      text: item.address,
+      placeId: "",
+      type: "favorite",
+      address: item.address,
+    });
+  }
+
+  for (const item of recentDestinations) {
+    localCandidates.push({
+      text: item.name,
+      placeId: "",
+      type: "recent",
+      address: item.name,
+    });
+  }
+
+  localCandidates.push(
+    {
+      text: "Praça da Moça, Centro, Diadema - SP",
+      placeId: "",
+      type: "known",
+      address: "Praça da Moça, Centro, Diadema - SP",
+    },
+    {
+      text: "Rua Presidente Wenceslau, Eldorado, Diadema - SP, Brasil",
+      placeId: "",
+      type: "known",
+      address: "Rua Presidente Wenceslau, Eldorado, Diadema - SP, Brasil",
+    }
+  );
+
+  const filtered = localCandidates.filter((item) => {
+    const normalizedText = normalizeText(item.text);
+    return (
+      normalizedText.includes(normalizedInput) ||
+      normalizedInput.includes(normalizedText)
+    );
+  });
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const item of filtered) {
+    const key = `${item.type}:${normalizeText(item.text)}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(item);
+    }
+  }
+
+  return unique;
+}
+
+async function rankSuggestionsByPriority(items, deviceLocation) {
+  const normalizedLocation = normalizeLocationPayload(deviceLocation);
+
+  const ranked = await Promise.all(
+    items.map(async (item) => {
+      let distance = null;
+
+      if (
+        normalizedLocation &&
+        item.address &&
+        item.type !== "google"
+      ) {
+        const geo = await geocodeDestination(item.address);
+        if (geo) {
+          distance = calculateDistanceKm(
+            normalizedLocation.latitude,
+            normalizedLocation.longitude,
+            geo.latitude,
+            geo.longitude
+          );
+        }
+      }
+
+      return {
+        ...item,
+        distance,
+      };
+    })
+  );
+
+  const priority = {
+    favorite: 0,
+    known: 1,
+    recent: 2,
+    google: 3,
+  };
+
+  ranked.sort((a, b) => {
+    const pa = priority[a.type] ?? 99;
+    const pb = priority[b.type] ?? 99;
+
+    if (pa !== pb) return pa - pb;
+
+    const da = typeof a.distance === "number" ? a.distance : 999999;
+    const db = typeof b.distance === "number" ? b.distance : 999999;
+
+    if (da !== db) return da - db;
+
+    return a.text.localeCompare(b.text, "pt-BR");
+  });
+
+  return ranked;
+}
+
+/* =========================
+   AUTOCOMPLETE GOOGLE PLACES
+========================= */
+async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionToken) {
+  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+  const cleanedInput = String(input || "").trim();
+
+  if (cleanedInput.length < 2) return [];
+
+  const localFallback = buildLocalSuggestionCandidates(cleanedInput);
+
+  let googleSuggestions = [];
+
+  if (googleMapsApiKey) {
+    const body = {
+      input: cleanedInput,
+      languageCode: "pt-BR",
+      regionCode: "BR",
+      includedRegionCodes: ["br"],
+      sessionToken: sessionToken || undefined,
+      includeQueryPredictions: false,
+    };
+
+    const normalizedLocation = normalizeLocationPayload(deviceLocation);
+
+    if (normalizedLocation) {
+      body.locationBias = {
+        circle: {
+          center: {
+            latitude: normalizedLocation.latitude,
+            longitude: normalizedLocation.longitude,
+          },
+          radius: 50000,
+        },
+      };
+    }
+
+    try {
+      const res = await fetch("https://places.googleapis.com/v1/places:autocomplete", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": googleMapsApiKey,
+          "X-Goog-FieldMask":
+            "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text",
+        },
+        body: JSON.stringify(body),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        console.error("❌ Places Autocomplete HTTP ERROR:", res.status, data);
+      } else if (Array.isArray(data?.suggestions)) {
+        googleSuggestions = data.suggestions
+          .map((item) => {
+            const prediction = item?.placePrediction;
+            const text = prediction?.text?.text || "";
+            const placeId = prediction?.placeId || "";
+
+            if (!text) return null;
+
+            return {
+              text,
+              placeId,
+              type: "google",
+              address: text,
+            };
+          })
+          .filter(Boolean);
+      }
+    } catch (error) {
+      console.error("❌ Erro autocomplete Google Places:", error);
+    }
+  } else {
+    console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
+  }
+
+  const merged = [...localFallback, ...googleSuggestions];
+  const unique = [];
+  const seen = new Set();
+
+  for (const item of merged) {
+    const key = normalizeText(item.text);
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(item);
+    }
+  }
+
+  const ranked = await rankSuggestionsByPriority(unique, deviceLocation);
+
+  return ranked.slice(0, 8).map((item) => ({
+    text: item.text,
+    placeId: item.placeId || "",
+    type: item.type,
+  }));
 }
 
 /* =========================
