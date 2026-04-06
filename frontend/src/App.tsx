@@ -80,6 +80,23 @@ function looksLikeNavigationInput(value: string) {
   );
 }
 
+function isCancelNavigationCommand(value: string) {
+  const text = normalizeText(value);
+
+  return (
+    text === "cancelar navegação" ||
+    text === "cancelar navegacao" ||
+    text === "encerrar navegação" ||
+    text === "encerrar navegacao" ||
+    text === "parar navegação" ||
+    text === "parar navegacao" ||
+    text === "fechar rota" ||
+    text === "cancelar rota" ||
+    text === "encerrar rota" ||
+    text === "parar rota"
+  );
+}
+
 function generateSessionToken() {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
@@ -208,7 +225,6 @@ export default function App() {
   const [steps, setSteps] = useState<Step[]>([]);
   const [recenterSignal, setRecenterSignal] = useState(0);
 
-  // IMPORTANTE:
   // navigationActive = rota ativa de verdade
   // showNavigationMap = apenas tela do mapa aberta/fechada
   const [navigationActive, setNavigationActive] = useState(false);
@@ -392,13 +408,10 @@ export default function App() {
   }
 
   function voltarAoChat() {
-    // fecha só a tela do mapa
-    // a navegação continua ativa
     setShowNavigationMap(false);
   }
 
   function cancelarNavegacao() {
-    // encerra a navegação de verdade
     setNavigationActive(false);
     setShowNavigationMap(false);
     setDestination(null);
@@ -414,12 +427,33 @@ export default function App() {
     const trimmed = String(messageOverride ?? input).trim();
     if (!trimmed) return;
 
-    console.log("ENVIANDO COM LOCALIZAÇÃO:", deviceLocation);
-
     setSuggestions([]);
     setIsSuggesting(false);
-
     setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
+    setInput("");
+
+    // CANCELAMENTO LOCAL IMEDIATO
+    if (isCancelNavigationCommand(trimmed)) {
+      if (navigationActive) {
+        cancelarNavegacao();
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Navegação cancelada com sucesso.",
+          },
+        ]);
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: "Não há navegação ativa no momento.",
+          },
+        ]);
+      }
+      return;
+    }
 
     try {
       const res = await sendChatMessage(trimmed, deviceLocation);
@@ -444,7 +478,6 @@ export default function App() {
         await refreshQuickAccess();
       }
 
-      // se backend informar cancelamento explícito
       if (res?.meta?.navigation?.active === false) {
         cancelarNavegacao();
       }
@@ -461,8 +494,6 @@ export default function App() {
         },
       ]);
     }
-
-    setInput("");
   }
 
   function handleSuggestionSelect(suggestion: NavigationSuggestion) {
