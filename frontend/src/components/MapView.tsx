@@ -153,7 +153,7 @@ function getCarSymbol(
 ): google.maps.Symbol {
   return {
     path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
-    scale: 6,
+    scale: 7,
     rotation,
     fillColor: "#2563eb",
     fillOpacity: 1,
@@ -176,7 +176,7 @@ export default function MapView({
   const destinationMarkerRef = useRef<google.maps.Marker | null>(null);
 
   const initializedRef = useRef(false);
-  const routeFittedRef = useRef(false);
+  const navigationReadyRef = useRef(false);
 
   const lastRouteOriginRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastRouteDestinationRef = useRef<{ lat: number; lng: number } | null>(null);
@@ -191,6 +191,38 @@ export default function MapView({
   const [mapReady, setMapReady] = useState(false);
   const [loadingMap, setLoadingMap] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
+
+  function focusNavigationCamera(
+    current: { lat: number; lng: number },
+    heading = 0,
+    speed?: number | null
+  ) {
+    if (!mapObj.current) return;
+
+    const map = mapObj.current;
+    const zoom = getNavigationZoom(speed);
+
+    map.setCenter(current);
+    map.setZoom(zoom);
+
+    if (typeof map.setTilt === "function") {
+      try {
+        map.setTilt(45);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (typeof map.setHeading === "function") {
+      try {
+        map.setHeading(heading);
+      } catch {
+        // ignore
+      }
+    }
+
+    animatedCenterRef.current = current;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -243,9 +275,9 @@ export default function MapView({
           suppressMarkers: true,
           preserveViewport: true,
           polylineOptions: {
-            strokeColor: "#22c55e",
+            strokeColor: "#2563eb",
             strokeOpacity: 0.95,
-            strokeWeight: 6,
+            strokeWeight: 7,
           },
         });
 
@@ -333,35 +365,35 @@ export default function MapView({
     const now = Date.now();
 
     if (!destination) {
+      navigationReadyRef.current = false;
       animatedCenterRef.current = current;
       map.setCenter(current);
 
-      const idleZoom = 18;
-      if ((map.getZoom() ?? idleZoom) !== idleZoom) {
-        map.setZoom(idleZoom);
+      if ((map.getZoom() ?? 18) !== 18) {
+        map.setZoom(18);
       }
 
       if (typeof map.setHeading === "function") {
         try {
           map.setHeading(0);
-        } catch (error) {
-          console.log("Heading idle não suportado:", error);
+        } catch {
+          // ignore
         }
       }
 
       if (typeof map.setTilt === "function") {
         try {
           map.setTilt(0);
-        } catch (error) {
-          console.log("Tilt idle não suportado:", error);
+        } catch {
+          // ignore
         }
       }
 
       return;
     }
 
-    const currentZoom = map.getZoom() ?? 18;
     const targetZoom = getNavigationZoom(location.speed);
+    const currentZoom = map.getZoom() ?? targetZoom;
 
     if (Math.abs(currentZoom - targetZoom) >= 1) {
       map.setZoom(targetZoom);
@@ -370,16 +402,16 @@ export default function MapView({
     if (typeof map.setTilt === "function") {
       try {
         map.setTilt(45);
-      } catch (error) {
-        console.log("Tilt 45 não suportado:", error);
+      } catch {
+        // ignore
       }
     }
 
     if (typeof map.setHeading === "function") {
       try {
         map.setHeading(headingRef.current);
-      } catch (error) {
-        console.log("Rotação do mapa não suportada:", error);
+      } catch {
+        // ignore
       }
     }
 
@@ -395,8 +427,8 @@ export default function MapView({
 
       const headingRad = (headingRef.current * Math.PI) / 180;
 
-      const backwardOffsetLat = Math.cos(headingRad) * latSpan * 0.18;
-      const backwardOffsetLng = Math.sin(headingRad) * lngSpan * 0.18;
+      const backwardOffsetLat = Math.cos(headingRad) * latSpan * 0.14;
+      const backwardOffsetLng = Math.sin(headingRad) * lngSpan * 0.14;
 
       projectedTarget = {
         lat: current.lat - backwardOffsetLat,
@@ -406,8 +438,8 @@ export default function MapView({
 
     const previousCenter = animatedCenterRef.current || projectedTarget;
     const nextCenter = {
-      lat: lerp(previousCenter.lat, projectedTarget.lat, 0.30),
-      lng: lerp(previousCenter.lng, projectedTarget.lng, 0.30),
+      lat: lerp(previousCenter.lat, projectedTarget.lat, 0.32),
+      lng: lerp(previousCenter.lng, projectedTarget.lng, 0.32),
     };
 
     const movedCenter = calculateDistanceMeters(
@@ -417,14 +449,10 @@ export default function MapView({
       nextCenter.lng
     );
 
-    if (movedCenter >= 1.2 || now - lastAnimatedAtRef.current > 900) {
+    if (movedCenter >= 1.2 || now - lastAnimatedAtRef.current > 850) {
       map.panTo(nextCenter);
       animatedCenterRef.current = nextCenter;
       lastAnimatedAtRef.current = now;
-    }
-
-    if (!routeFittedRef.current) {
-      animatedCenterRef.current = projectedTarget;
     }
   }, [location, destination]);
 
@@ -544,9 +572,9 @@ export default function MapView({
           destinationMarkerRef.current.setMap(mapObj.current);
         }
 
-        if (!routeFittedRef.current && bestRoute.bounds) {
-          mapObj.current.fitBounds(bestRoute.bounds, 80);
-          routeFittedRef.current = true;
+        if (!navigationReadyRef.current) {
+          focusNavigationCamera(currentOrigin, headingRef.current, location.speed);
+          navigationReadyRef.current = true;
         }
 
         const steps: Step[] = bestLeg.steps.map((step) => ({
@@ -564,7 +592,7 @@ export default function MapView({
 
   useEffect(() => {
     if (!destination) {
-      routeFittedRef.current = false;
+      navigationReadyRef.current = false;
       lastRouteOriginRef.current = null;
       lastRouteDestinationRef.current = null;
       animatedCenterRef.current = null;
@@ -591,16 +619,16 @@ export default function MapView({
         if (typeof mapObj.current.setHeading === "function") {
           try {
             mapObj.current.setHeading(0);
-          } catch (error) {
-            console.log("Reset heading não suportado:", error);
+          } catch {
+            // ignore
           }
         }
 
         if (typeof mapObj.current.setTilt === "function") {
           try {
             mapObj.current.setTilt(0);
-          } catch (error) {
-            console.log("Reset tilt não suportado:", error);
+          } catch {
+            // ignore
           }
         }
       }
