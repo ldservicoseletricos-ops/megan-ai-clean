@@ -15,7 +15,7 @@ dotenv.config();
 const destinationCache = new Map();
 
 /* =========================
-   FAVORITOS E HISTÓRICO
+   FAVORITOS / HISTÓRICO / CONTEXTO
 ========================= */
 const favoriteDestinations = [
   {
@@ -31,6 +31,11 @@ const favoriteDestinations = [
 ];
 
 const recentDestinations = [];
+let activeNavigationContext = {
+  active: false,
+  destination: null,
+  startedAt: null,
+};
 
 /* =========================
    APP INIT
@@ -98,6 +103,9 @@ function cleanDestinationText(text) {
     .replace(/^ir pra\s+/i, "")
     .replace(/^rota para\s+/i, "")
     .replace(/^me leve para\s+/i, "")
+    .replace(/^me leva para\s+/i, "")
+    .replace(/^me leve pra\s+/i, "")
+    .replace(/^me leva pra\s+/i, "")
     .replace(/^abrir rota para\s+/i, "")
     .replace(/^abrir mapa para\s+/i, "")
     .replace(/^navegar\s+/i, "")
@@ -116,6 +124,9 @@ function detectNavigationIntent(message) {
     "ir pra ",
     "rota para ",
     "me leve para ",
+    "me leva para ",
+    "me leve pra ",
+    "me leva pra ",
     "abrir rota para ",
     "abrir mapa para ",
     "navegar ",
@@ -407,6 +418,115 @@ function addRecentDestination(destination) {
   recentDestinations.push(...filtered.slice(0, 6));
 }
 
+function setActiveNavigation(destination) {
+  activeNavigationContext = {
+    active: true,
+    destination,
+    startedAt: new Date().toISOString(),
+  };
+}
+
+function clearActiveNavigation() {
+  activeNavigationContext = {
+    active: false,
+    destination: null,
+    startedAt: null,
+  };
+}
+
+function hasActiveNavigation() {
+  return Boolean(activeNavigationContext.active && activeNavigationContext.destination);
+}
+
+function isCancelNavigationRequest(message) {
+  const text = normalizeText(message);
+
+  return [
+    "cancelar rota",
+    "parar rota",
+    "encerrar rota",
+    "fechar rota",
+    "cancelar navegacao",
+    "cancelar navegação",
+    "parar navegacao",
+    "parar navegação",
+  ].includes(text);
+}
+
+function isCurrentDestinationRequest(message) {
+  const text = normalizeText(message);
+
+  return [
+    "qual o destino atual",
+    "qual destino atual",
+    "para onde estou indo",
+    "qual rota ativa",
+    "qual a rota ativa",
+    "destino atual",
+  ].includes(text);
+}
+
+function isEtaRequest(message) {
+  const text = normalizeText(message);
+
+  return [
+    "quanto falta",
+    "quanto tempo falta",
+    "quanto tempo ate la",
+    "quanto tempo até la",
+    "quanto tempo ate lá",
+    "quanto tempo até lá",
+    "chego em quanto tempo",
+    "qual o eta",
+    "quanto resta",
+  ].includes(text);
+}
+
+function isTrafficToDestinationRequest(message) {
+  const text = normalizeText(message);
+
+  return [
+    "tem transito ate la",
+    "tem trânsito até lá",
+    "tem transito até la",
+    "tem trânsito ate la",
+    "como esta o transito ate la",
+    "como está o trânsito até lá",
+    "transito ate la",
+    "trânsito até lá",
+  ].includes(text);
+}
+
+function findFavoriteDestinationByMessage(message) {
+  const text = normalizeText(message);
+
+  if (
+    text === "casa" ||
+    text === "me leva para casa" ||
+    text === "me leva pra casa" ||
+    text === "ir para casa" ||
+    text === "ir pra casa" ||
+    text === "navegar para casa" ||
+    text === "navegar pra casa"
+  ) {
+    return favoriteDestinations.find((item) => item.id === "home") || null;
+  }
+
+  if (
+    text === "trabalho" ||
+    text === "me leva para o trabalho" ||
+    text === "me leva pro trabalho" ||
+    text === "ir para o trabalho" ||
+    text === "ir pro trabalho" ||
+    text === "navegar para o trabalho" ||
+    text === "navegar pro trabalho"
+  ) {
+    return favoriteDestinations.find((item) => item.id === "work") || null;
+  }
+
+  return null;
+}
+
 async function geocodeDestination(query) {
   const cleaned = cleanDestinationText(query);
   const normalized = normalizeText(cleaned);
@@ -590,6 +710,34 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
+function buildDistanceEtaReply(deviceLocation, destination) {
+  if (!deviceLocation || !destination) {
+    return {
+      distance: "--",
+      eta: "--",
+      reply: "Preciso da localização atual para calcular o trajeto.",
+    };
+  }
+
+  const distanceKm = calculateDistanceKm(
+    Number(deviceLocation.latitude),
+    Number(deviceLocation.longitude),
+    Number(destination.latitude),
+    Number(destination.longitude)
+  );
+
+  const distance = `${distanceKm.toFixed(2)} km`;
+  const averageSpeedKmh = 40;
+  const minutes = Math.max(1, Math.round((distanceKm / averageSpeedKmh) * 60));
+  const eta = `${minutes} min`;
+
+  return {
+    distance,
+    eta,
+    reply: `📍 Destino atual: ${destination.name}\nDistância aproximada: ${distance}\nTempo estimado: ${eta}`,
+  };
+}
+
 /* =========================
    HEALTH
 ========================= */
@@ -651,6 +799,123 @@ app.post("/api/chat", async (req, res) => {
       });
     }
 
+    if (isCancelNavigationRequest(text)) {
+      clearActiveNavigation();
+
+      return res.json({
+        ok: true,
+        reply: "🛑 Rota cancelada.",
+        meta: {
+          navigation: {
+            active: false,
+            destination: null,
+          },
+        },
+      });
+    }
+
+    if (isCurrentDestinationRequest(text)) {
+      if (!hasActiveNavigation()) {
+        return res.json({
+          ok: true,
+          reply: "Nenhuma rota está ativa no momento.",
+        });
+      }
+
+      return res.json({
+        ok: true,
+        reply: `📍 Destino atual: ${activeNavigationContext.destination.name}`,
+        meta: {
+          navigation: {
+            active: true,
+            destination: activeNavigationContext.destination,
+          },
+        },
+      });
+    }
+
+    if (isEtaRequest(text)) {
+      if (!hasActiveNavigation()) {
+        return res.json({
+          ok: true,
+          reply: "Nenhuma rota está ativa no momento.",
+        });
+      }
+
+      const info = buildDistanceEtaReply(
+        normalizedLocation,
+        activeNavigationContext.destination
+      );
+
+      return res.json({
+        ok: true,
+        reply: info.reply,
+        meta: {
+          navigation: {
+            active: true,
+            destination: activeNavigationContext.destination,
+          },
+          trip: {
+            distance: info.distance,
+            eta: info.eta,
+          },
+        },
+      });
+    }
+
+    if (isTrafficToDestinationRequest(text)) {
+      if (!hasActiveNavigation()) {
+        return res.json({
+          ok: true,
+          reply: "Nenhuma rota está ativa no momento.",
+        });
+      }
+
+      const info = buildDistanceEtaReply(
+        normalizedLocation,
+        activeNavigationContext.destination
+      );
+
+      return res.json({
+        ok: true,
+        reply:
+          `🚦 Trânsito estimado até ${activeNavigationContext.destination.name}:\n` +
+          `Distância aproximada: ${info.distance}\n` +
+          `Tempo estimado: ${info.eta}`,
+        meta: {
+          navigation: {
+            active: true,
+            destination: activeNavigationContext.destination,
+          },
+          trip: {
+            distance: info.distance,
+            eta: info.eta,
+          },
+        },
+      });
+    }
+
+    const favoriteByMessage = findFavoriteDestinationByMessage(text);
+    if (favoriteByMessage) {
+      const destination = await geocodeDestination(favoriteByMessage.address);
+
+      if (destination) {
+        addRecentDestination(destination);
+        setActiveNavigation(destination);
+
+        return res.json({
+          ok: true,
+          reply: `🏠 Iniciando navegação para ${destination.name}`,
+          meta: {
+            navigation: {
+              active: true,
+              destination,
+            },
+          },
+        });
+      }
+    }
+
     const nav = detectNavigationIntent(text);
 
     if (nav.isNavigationRequest) {
@@ -658,6 +923,7 @@ app.post("/api/chat", async (req, res) => {
 
       if (destination) {
         addRecentDestination(destination);
+        setActiveNavigation(destination);
 
         return res.json({
           ok: true,
