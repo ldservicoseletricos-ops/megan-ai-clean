@@ -106,14 +106,10 @@ function detectNavigationIntent(message) {
 
   for (const pattern of patterns) {
     if (text.startsWith(pattern)) {
-      const destinationText = cleanDestinationText(original);
-
-      if (destinationText) {
-        return {
-          isNavigationRequest: true,
-          destinationText,
-        };
-      }
+      return {
+        isNavigationRequest: true,
+        destinationText: cleanDestinationText(original),
+      };
     }
   }
 
@@ -312,6 +308,8 @@ async function googleGeocode(address) {
     return null;
   }
 
+  console.log("🔎 Geocode:", address);
+
   const url =
     `https://maps.googleapis.com/maps/api/geocode/json` +
     `?address=${encodeURIComponent(address)}` +
@@ -322,7 +320,11 @@ async function googleGeocode(address) {
   const res = await fetch(url);
   const data = await res.json();
 
-  if (data?.status === "OK" && Array.isArray(data.results) && data.results.length > 0) {
+  if (
+    data?.status === "OK" &&
+    Array.isArray(data.results) &&
+    data.results.length > 0
+  ) {
     const result = data.results[0];
 
     return {
@@ -340,21 +342,31 @@ function buildAddressCandidates(cleaned) {
   const candidates = new Set();
 
   candidates.add(cleaned);
-  candidates.add(`${cleaned}, Diadema, SP, Brasil`);
+  candidates.add(`${cleaned}, Diadema, SP`);
+  candidates.add(`${cleaned}, Diadema, São Paulo`);
+  candidates.add(`${cleaned}, Diadema, São Paulo, Brasil`);
   candidates.add(`${cleaned}, São Bernardo do Campo, SP, Brasil`);
   candidates.add(`${cleaned}, São Paulo, SP, Brasil`);
+  candidates.add(`${cleaned}, Brasil`);
 
   const normalized = normalizeText(cleaned);
 
   if (normalized.includes("venceslau")) {
-    candidates.add(cleaned.replace(/venceslau/gi, "Wenceslau"));
-    candidates.add(`${cleaned.replace(/venceslau/gi, "Wenceslau")}, Diadema, SP, Brasil`);
+    const fixed = cleaned.replace(/venceslau/gi, "Wenceslau");
+    candidates.add(fixed);
+    candidates.add(`${fixed}, Diadema, SP`);
+    candidates.add(`${fixed}, Diadema, São Paulo, Brasil`);
   }
 
   if (normalized.includes("wenceslau")) {
-    candidates.add(cleaned.replace(/wenceslau/gi, "Venceslau"));
-    candidates.add(`${cleaned.replace(/wenceslau/gi, "Venceslau")}, Diadema, SP, Brasil`);
+    const fixed = cleaned.replace(/wenceslau/gi, "Venceslau");
+    candidates.add(fixed);
+    candidates.add(`${fixed}, Diadema, SP`);
+    candidates.add(`${fixed}, Diadema, São Paulo, Brasil`);
   }
+
+  candidates.add(`${cleaned}, 100, Diadema, SP`);
+  candidates.add(`${cleaned}, 1, Diadema, SP`);
 
   return Array.from(candidates);
 }
@@ -393,6 +405,97 @@ async function geocodeDestination(query) {
   return null;
 }
 
+/* =========================
+   AUTOCOMPLETE GOOGLE PLACES
+========================= */
+async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionToken) {
+  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+
+  if (!googleMapsApiKey) {
+    console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
+    return [];
+  }
+
+  const cleanedInput = String(input || "").trim();
+  if (cleanedInput.length < 3) return [];
+
+  const body = {
+    input: cleanedInput,
+    languageCode: "pt-BR",
+    regionCode: "BR",
+    includedRegionCodes: ["br"],
+    sessionToken: sessionToken || undefined,
+    includeQueryPredictions: false,
+  };
+
+  const normalizedLocation = normalizeLocationPayload(deviceLocation);
+
+  if (normalizedLocation) {
+    body.locationBias = {
+      circle: {
+        center: {
+          latitude: normalizedLocation.latitude,
+          longitude: normalizedLocation.longitude,
+        },
+        radius: 50000,
+      },
+    };
+  }
+
+  try {
+    const res = await fetch("https://places.googleapis.com/v1/places:autocomplete", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": googleMapsApiKey,
+        "X-Goog-FieldMask":
+          "suggestions.placePrediction.text.text,suggestions.placePrediction.placeId",
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.error("❌ Places Autocomplete HTTP ERROR:", res.status, data);
+      return [];
+    }
+
+    const suggestions = Array.isArray(data?.suggestions)
+      ? data.suggestions
+          .map((item) => {
+            const prediction = item?.placePrediction;
+            const text = prediction?.text?.text || "";
+            const placeId = prediction?.placeId || "";
+
+            if (!text) return null;
+
+            return {
+              text,
+              placeId,
+            };
+          })
+          .filter(Boolean)
+      : [];
+
+    const unique = [];
+    const seen = new Set();
+
+    for (const item of suggestions) {
+      const key = normalizeText(item.text);
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(item);
+      }
+    }
+
+    return unique.slice(0, 5);
+  } catch (error) {
+    console.error("❌ Erro autocomplete Google Places:", error);
+    return [];
+  }
+}
+
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
@@ -412,6 +515,33 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
 ========================= */
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+/* =========================
+   AUTOCOMPLETE NAVIGATION
+========================= */
+app.post("/api/navigation/suggest", async (req, res) => {
+  try {
+    const { input, deviceLocation, sessionToken } = req.body || {};
+
+    const suggestions = await getPlaceAutocompleteSuggestions(
+      input,
+      deviceLocation,
+      sessionToken
+    );
+
+    return res.json({
+      ok: true,
+      suggestions,
+    });
+  } catch (error) {
+    console.error("Erro em /api/navigation/suggest:", error);
+    return res.status(500).json({
+      ok: false,
+      suggestions: [],
+      error: "Erro ao buscar sugestões",
+    });
+  }
 });
 
 /* =========================
