@@ -24,12 +24,42 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const watchId = navigator.geolocation.watchPosition(
+    if (!navigator.geolocation) {
+      console.log("Geolocalização não suportada");
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setDeviceLocation({
+        const loc = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
-        });
+          accuracy: pos.coords.accuracy ?? null,
+        };
+
+        console.log("LOCALIZAÇÃO INICIAL:", loc);
+        setDeviceLocation(loc);
+      },
+      (error) => {
+        console.log("Erro localização inicial:", error);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0,
+      }
+    );
+
+    const watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        const loc = {
+          latitude: pos.coords.latitude,
+          longitude: pos.coords.longitude,
+          accuracy: pos.coords.accuracy ?? null,
+        };
+
+        console.log("LOCALIZAÇÃO ATUALIZADA:", loc);
+        setDeviceLocation(loc);
       },
       (error) => {
         console.log("Erro geolocalização:", error);
@@ -47,6 +77,8 @@ export default function App() {
   async function handleSend() {
     const trimmed = input.trim();
     if (!trimmed) return;
+
+    console.log("ENVIANDO COM LOCALIZAÇÃO:", deviceLocation);
 
     setMessages((prev) => [
       ...prev,
