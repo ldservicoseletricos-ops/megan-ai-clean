@@ -106,9 +106,9 @@ function isWeatherRequest(message) {
     "previsao",
     "previsão",
     "vai chover",
+    "clima agora",
     "como esta o clima",
     "como está o clima",
-    "clima agora",
     "qual o clima",
   ].some((term) => normalized.includes(normalizeText(term)));
 }
@@ -126,6 +126,10 @@ function normalizeLocationPayload(deviceLocation) {
   return {
     latitude,
     longitude,
+    accuracy:
+      typeof deviceLocation.accuracy === "number"
+        ? deviceLocation.accuracy
+        : null,
   };
 }
 
@@ -161,24 +165,40 @@ async function getWeatherFromCoords(latitude, longitude) {
       `https://api.open-meteo.com/v1/forecast` +
       `?latitude=${encodeURIComponent(latitude)}` +
       `&longitude=${encodeURIComponent(longitude)}` +
-      `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m` +
+      `&current_weather=true` +
       `&timezone=auto`;
 
-    const res = await fetch(url);
-    const data = await res.json();
+    console.log("🌤️ Consultando clima:", { latitude, longitude, url });
 
-    const current = data?.current;
-    if (!current) return null;
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("❌ Open-Meteo HTTP ERROR:", res.status, text);
+      return null;
+    }
+
+    const data = await res.json();
+    const current = data?.current_weather;
+
+    if (!current) {
+      console.error("❌ Open-Meteo sem current_weather:", data);
+      return null;
+    }
 
     return {
-      temperature: current.temperature_2m,
-      feelsLike: current.apparent_temperature,
-      windSpeed: current.wind_speed_10m,
-      weatherCode: current.weather_code,
-      weatherText: weatherCodeToText(current.weather_code),
+      temperature: current.temperature,
+      windSpeed: current.windspeed,
+      weatherCode: current.weathercode,
+      weatherText: weatherCodeToText(current.weathercode),
+      time: current.time || null,
     };
   } catch (err) {
-    console.log("Erro clima:", err);
+    console.error("❌ Erro clima:", err);
     return null;
   }
 }
@@ -285,6 +305,12 @@ app.post("/api/chat", async (req, res) => {
     const { message, deviceLocation } = req.body;
     const normalizedLocation = normalizeLocationPayload(deviceLocation);
 
+    console.log("📩 /api/chat recebida:", {
+      message,
+      deviceLocation,
+      normalizedLocation,
+    });
+
     const nav = detectNavigationIntent(message);
 
     if (nav.isNavigationRequest) {
@@ -334,7 +360,6 @@ app.post("/api/chat", async (req, res) => {
           reply:
             `🌤️ Clima agora no seu local:\n` +
             `Temperatura: ${weather.temperature}°C\n` +
-            `Sensação térmica: ${weather.feelsLike}°C\n` +
             `Condição: ${weather.weatherText}\n` +
             `Vento: ${weather.windSpeed} km/h`,
         });
