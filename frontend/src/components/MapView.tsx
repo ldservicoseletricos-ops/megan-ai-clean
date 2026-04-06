@@ -11,6 +11,11 @@ type Step = {
   end_location: { lat: number; lng: number };
 };
 
+type LatLngPoint = {
+  lat: number;
+  lng: number;
+};
+
 type MapViewProps = {
   location: {
     latitude: number;
@@ -163,6 +168,34 @@ function getCarSymbol(
   };
 }
 
+function flattenOverviewPath(route: google.maps.DirectionsRoute): LatLngPoint[] {
+  if (!route.overview_path?.length) return [];
+
+  return route.overview_path.map((point) => ({
+    lat: point.lat(),
+    lng: point.lng(),
+  }));
+}
+
+function isPointOnRoute(
+  google: typeof window.google,
+  point: LatLngPoint,
+  routePath: LatLngPoint[],
+  toleranceMeters: number
+) {
+  if (!routePath.length || !google.maps.geometry?.poly) return false;
+
+  const polyline = new google.maps.Polyline({
+    path: routePath,
+  });
+
+  return google.maps.geometry.poly.isLocationOnEdge(
+    new google.maps.LatLng(point.lat, point.lng),
+    polyline,
+    toleranceMeters / 6378137
+  );
+}
+
 export default function MapView({
   location,
   destination,
@@ -177,15 +210,18 @@ export default function MapView({
 
   const initializedRef = useRef(false);
   const navigationReadyRef = useRef(false);
+
   const lastRouteAtRef = useRef(0);
+  const lastOffRouteAtRef = useRef(0);
 
-  const lastRouteOriginRef = useRef<{ lat: number; lng: number } | null>(null);
-  const lastRouteDestinationRef = useRef<{ lat: number; lng: number } | null>(null);
+  const lastRouteOriginRef = useRef<LatLngPoint | null>(null);
+  const lastRouteDestinationRef = useRef<LatLngPoint | null>(null);
 
-  const animatedCenterRef = useRef<{ lat: number; lng: number } | null>(null);
+  const routePathRef = useRef<LatLngPoint[]>([]);
+  const animatedCenterRef = useRef<LatLngPoint | null>(null);
   const lastAnimatedAtRef = useRef(0);
 
-  const lastLocationForHeadingRef = useRef<{ lat: number; lng: number } | null>(null);
+  const lastLocationForHeadingRef = useRef<LatLngPoint | null>(null);
   const headingRef = useRef(0);
   const markerHeadingRef = useRef(0);
 
@@ -194,7 +230,7 @@ export default function MapView({
   const [errorMessage, setErrorMessage] = useState("");
 
   function focusNavigationCamera(
-    current: { lat: number; lng: number },
+    current: LatLngPoint,
     heading = 0,
     speed?: number | null
   ) {
@@ -467,10 +503,8 @@ export default function MapView({
       return;
     }
 
+    const google = window.google;
     const now = Date.now();
-    if (now - lastRouteAtRef.current < 8000) {
-      return;
-    }
 
     const currentOrigin = {
       lat: location.latitude,
@@ -482,19 +516,8 @@ export default function MapView({
       lng: destination.longitude,
     };
 
-    const previousOrigin = lastRouteOriginRef.current;
     const previousDestination = lastRouteDestinationRef.current;
-
-    const movedFromLastOrigin = previousOrigin
-      ? calculateDistanceMeters(
-          previousOrigin.lat,
-          previousOrigin.lng,
-          currentOrigin.lat,
-          currentOrigin.lng
-        )
-      : Number.MAX_SAFE_INTEGER;
-
-    const movedDestination = previousDestination
+    const destinationMoved = previousDestination
       ? calculateDistanceMeters(
           previousDestination.lat,
           previousDestination.lng,
@@ -503,10 +526,35 @@ export default function MapView({
         )
       : Number.MAX_SAFE_INTEGER;
 
+    const hasRoute = routePathRef.current.length > 0;
+
+    let offRoute = false;
+    if (hasRoute) {
+      const toleranceMeters =
+        typeof location.speed === "number" && location.speed * 3.6 > 50 ? 45 : 30;
+
+      offRoute = !isPointOnRoute(
+        google,
+        currentOrigin,
+        routePathRef.current,
+        toleranceMeters
+      );
+    }
+
+    if (offRoute) {
+      lastOffRouteAtRef.current = now;
+    }
+
+    const destinationChanged = destinationMoved >= 5;
+    const routeNotLoaded = !navigationReadyRef.current || !hasRoute;
+
+    const recentlyOffRoute = now - lastOffRouteAtRef.current < 12000;
+    const cooldownPassed = now - lastRouteAtRef.current >= 9000;
+
     const shouldRecalculate =
-      !navigationReadyRef.current ||
-      movedFromLastOrigin >= 120 ||
-      movedDestination >= 5;
+      routeNotLoaded ||
+      destinationChanged ||
+      (recentlyOffRoute && cooldownPassed);
 
     if (!shouldRecalculate) {
       return;
@@ -516,7 +564,6 @@ export default function MapView({
     lastRouteOriginRef.current = currentOrigin;
     lastRouteDestinationRef.current = currentDestination;
 
-    const google = window.google;
     const directionsService = new google.maps.DirectionsService();
 
     directionsService.route(
@@ -547,6 +594,8 @@ export default function MapView({
 
         if (!bestLeg) return;
 
+        routePathRef.current = flattenOverviewPath(bestRoute);
+
         const destinationPosition = {
           lat: destination.latitude,
           lng: destination.longitude,
@@ -564,10 +613,12 @@ export default function MapView({
           destinationMarkerRef.current.setMap(mapObj.current);
         }
 
-        if (!navigationReadyRef.current) {
+        if (!navigationReadyRef.current || routeNotLoaded) {
           focusNavigationCamera(currentOrigin, headingRef.current, location.speed);
-          navigationReadyRef.current = true;
         }
+
+        navigationReadyRef.current = true;
+        lastOffRouteAtRef.current = 0;
 
         const steps: Step[] = bestLeg.steps.map((step) => ({
           instruction: step.instructions.replace(/<[^>]+>/g, ""),
@@ -586,8 +637,10 @@ export default function MapView({
     if (!destination) {
       navigationReadyRef.current = false;
       lastRouteAtRef.current = 0;
+      lastOffRouteAtRef.current = 0;
       lastRouteOriginRef.current = null;
       lastRouteDestinationRef.current = null;
+      routePathRef.current = [];
       animatedCenterRef.current = null;
       lastLocationForHeadingRef.current = location
         ? { lat: location.latitude, lng: location.longitude }
