@@ -1,709 +1,938 @@
-import MapView from "./components/MapView";
-import DrivingMode from "./components/DrivingMode";
 import { useEffect, useRef, useState } from "react";
-import {
-  checkHealth,
-  sendChatMessage,
-  suggestNavigation,
-  getNavigationQuickAccess,
-} from "./services/api";
 
-type Message = {
-  role: "user" | "assistant";
-  content: string;
-};
+declare global {
+  interface Window {
+    google?: typeof google;
+  }
+}
 
 type Step = {
   instruction: string;
   end_location: { lat: number; lng: number };
 };
 
-type NavigationSuggestion = {
-  text: string;
-  placeId?: string;
-  type?: "favorite" | "recent" | "google";
+type LatLngPoint = {
+  lat: number;
+  lng: number;
 };
 
-type QuickAccessItem = {
-  id?: string;
-  label?: string;
-  address?: string;
-  name?: string;
+type MapViewProps = {
+  location: {
+    latitude: number;
+    longitude: number;
+    speed?: number | null;
+    accuracy?: number | null;
+  } | null;
+  destination?: {
+    latitude: number;
+    longitude: number;
+    name?: string;
+  } | null;
+  onStepsUpdate?: (steps: Step[]) => void;
+  recenterSignal?: number;
 };
 
-type DeviceLocation = {
-  latitude: number;
-  longitude: number;
-  accuracy?: number | null;
-  speed?: number | null;
-};
+const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
-type Destination = {
-  latitude: number;
-  longitude: number;
-  name?: string;
-} | null;
+function loadGoogleMapsScript(): Promise<typeof google> {
+  return new Promise((resolve, reject) => {
+    if (window.google?.maps) {
+      resolve(window.google);
+      return;
+    }
 
-function normalizeText(value: string) {
-  return String(value || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .trim();
-}
+    const existingScript = document.getElementById(
+      "google-maps-script"
+    ) as HTMLScriptElement | null;
 
-function looksLikeNavigationInput(value: string) {
-  const text = normalizeText(value);
+    if (existingScript) {
+      const handleLoad = () => {
+        if (window.google?.maps) resolve(window.google);
+        else reject(new Error("Google Maps carregou sem window.google.maps"));
+      };
 
-  return (
-    text.startsWith("navegar") ||
-    text.startsWith("ir para") ||
-    text.startsWith("ir pra") ||
-    text.startsWith("rota") ||
-    text.includes("rua ") ||
-    text.includes("avenida ") ||
-    text.includes("av ") ||
-    text.includes("estrada ") ||
-    text.includes("rodovia ") ||
-    text.includes("travessa ") ||
-    text.includes("alameda ") ||
-    text.includes("praca ") ||
-    text.includes("praça ")
-  );
-}
+      const handleError = () => {
+        reject(new Error("Falha ao carregar Google Maps"));
+      };
 
-function generateSessionToken() {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return crypto.randomUUID();
-  }
+      existingScript.addEventListener("load", handleLoad, { once: true });
+      existingScript.addEventListener("error", handleError, { once: true });
+      return;
+    }
 
-  return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    if (!GOOGLE_MAPS_API_KEY) {
+      reject(new Error("VITE_GOOGLE_MAPS_API_KEY não configurada"));
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.id = "google-maps-script";
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&libraries=geometry`;
+    script.async = true;
+    script.defer = true;
+
+    script.onload = () => {
+      if (window.google?.maps) resolve(window.google);
+      else reject(new Error("Google Maps carregou sem window.google.maps"));
+    };
+
+    script.onerror = () => {
+      reject(new Error("Falha ao carregar Google Maps"));
+    };
+
+    document.head.appendChild(script);
+  });
 }
 
 function calculateDistanceMeters(
   lat1: number,
-  lon1: number,
+  lng1: number,
   lat2: number,
-  lon2: number
+  lng2: number
 ) {
   const R = 6371000;
   const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
 
   const a =
     Math.sin(dLat / 2) ** 2 +
     Math.cos((lat1 * Math.PI) / 180) *
       Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
+      Math.sin(dLng / 2) ** 2;
 
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
-function getSpeedKmh(speed?: number | null) {
-  if (typeof speed !== "number" || Number.isNaN(speed)) return 0;
-  return Math.max(0, speed * 3.6);
+function lerp(start: number, end: number, factor: number) {
+  return start + (end - start) * factor;
 }
 
-function isValidCoordinate(value: number) {
-  return typeof value === "number" && Number.isFinite(value);
+function normalizeAngle(angle: number) {
+  let normalized = angle % 360;
+  if (normalized < 0) normalized += 360;
+  return normalized;
 }
 
-function isReasonableLocation(loc: DeviceLocation) {
-  return (
-    isValidCoordinate(loc.latitude) &&
-    isValidCoordinate(loc.longitude) &&
-    Math.abs(loc.latitude) <= 90 &&
-    Math.abs(loc.longitude) <= 180
-  );
+function shortestAngleDelta(from: number, to: number) {
+  let delta = normalizeAngle(to) - normalizeAngle(from);
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  return delta;
 }
 
-function shouldAcceptLocationUpdate(
-  previous: DeviceLocation | null,
-  next: DeviceLocation,
-  timeDiffMs: number
+function smoothAngle(from: number, to: number, factor: number) {
+  return normalizeAngle(from + shortestAngleDelta(from, to) * factor);
+}
+
+function getNavigationZoom(speed?: number | null) {
+  const speedKmh =
+    typeof speed === "number" && !Number.isNaN(speed) ? speed * 3.6 : 0;
+
+  if (speedKmh >= 90) return 16;
+  if (speedKmh >= 60) return 17;
+  if (speedKmh >= 25) return 18;
+  return 19;
+}
+
+function calculateBearing(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
 ) {
-  if (!isReasonableLocation(next)) return false;
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const lambda1 = (lng1 * Math.PI) / 180;
+  const lambda2 = (lng2 * Math.PI) / 180;
 
-  const nextAccuracy =
-    typeof next.accuracy === "number" && !Number.isNaN(next.accuracy)
-      ? next.accuracy
-      : 9999;
+  const y = Math.sin(lambda2 - lambda1) * Math.cos(phi2);
+  const x =
+    Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(lambda2 - lambda1);
 
-  if (nextAccuracy > 120) {
-    return false;
-  }
-
-  if (!previous) {
-    return true;
-  }
-
-  const prevAccuracy =
-    typeof previous.accuracy === "number" && !Number.isNaN(previous.accuracy)
-      ? previous.accuracy
-      : 9999;
-
-  const distance = calculateDistanceMeters(
-    previous.latitude,
-    previous.longitude,
-    next.latitude,
-    next.longitude
-  );
-
-  const nextSpeedKmh = getSpeedKmh(next.speed);
-  const prevSpeedKmh = getSpeedKmh(previous.speed);
-
-  const effectiveTimeSec = Math.max(1, timeDiffMs / 1000);
-  const impliedSpeedKmh = (distance / effectiveTimeSec) * 3.6;
-
-  if (distance < 2 && nextAccuracy >= prevAccuracy - 3) {
-    return false;
-  }
-
-  if (impliedSpeedKmh > 220 && nextSpeedKmh < 130) {
-    return false;
-  }
-
-  if (distance > 60 && nextAccuracy > prevAccuracy + 20 && nextSpeedKmh < 15) {
-    return false;
-  }
-
-  if (nextAccuracy + 8 < prevAccuracy) {
-    return true;
-  }
-
-  if (distance >= 4) {
-    return true;
-  }
-
-  if (nextSpeedKmh >= 8 && prevSpeedKmh < 8) {
-    return true;
-  }
-
-  if (Math.abs(nextSpeedKmh - prevSpeedKmh) >= 10) {
-    return true;
-  }
-
-  return false;
+  const theta = Math.atan2(y, x);
+  return normalizeAngle((theta * 180) / Math.PI);
 }
 
-export default function App() {
-  const [status, setStatus] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
-  const [deviceLocation, setDeviceLocation] = useState<DeviceLocation | null>(null);
-  const [destination, setDestination] = useState<Destination>(null);
-  const [steps, setSteps] = useState<Step[]>([]);
-  const [showMap, setShowMap] = useState(false);
+function getCarSymbol(
+  google: typeof window.google,
+  rotation: number
+): google.maps.Symbol {
+  return {
+    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+    scale: 7,
+    rotation,
+    fillColor: "#2563eb",
+    fillOpacity: 1,
+    strokeColor: "#ffffff",
+    strokeWeight: 2,
+    anchor: new google.maps.Point(0, 2),
+  };
+}
 
-  const [suggestions, setSuggestions] = useState<NavigationSuggestion[]>([]);
-  const [isSuggesting, setIsSuggesting] = useState(false);
+function flattenOverviewPath(route: google.maps.DirectionsRoute): LatLngPoint[] {
+  if (!route.overview_path?.length) return [];
 
-  const [favorites, setFavorites] = useState<QuickAccessItem[]>([]);
-  const [recent, setRecent] = useState<QuickAccessItem[]>([]);
+  return route.overview_path.map((point) => ({
+    lat: point.lat(),
+    lng: point.lng(),
+  }));
+}
 
-  const debounceRef = useRef<number | null>(null);
-  const sessionTokenRef = useRef(generateSessionToken());
-  const lastAcceptedLocationRef = useRef<DeviceLocation | null>(null);
-  const lastAcceptedAtRef = useRef(0);
+function buildRoutePolyline(
+  google: typeof window.google,
+  routePath: LatLngPoint[]
+) {
+  return new google.maps.Polyline({
+    path: routePath,
+  });
+}
 
-  useEffect(() => {
-    checkHealth().then(() => setStatus("Online")).catch(() => setStatus("Offline"));
-  }, []);
+function isPointOnRoute(
+  google: typeof window.google,
+  point: LatLngPoint,
+  routePath: LatLngPoint[],
+  toleranceMeters: number
+) {
+  if (!routePath.length || !google.maps.geometry?.poly) return false;
 
-  useEffect(() => {
-    async function loadQuickAccess() {
+  const polyline = buildRoutePolyline(google, routePath);
+
+  return google.maps.geometry.poly.isLocationOnEdge(
+    new google.maps.LatLng(point.lat, point.lng),
+    polyline,
+    toleranceMeters / 6378137
+  );
+}
+
+function getDynamicToleranceMeters(
+  speed?: number | null,
+  accuracy?: number | null
+) {
+  const speedKmh =
+    typeof speed === "number" && !Number.isNaN(speed) ? speed * 3.6 : 0;
+
+  let tolerance = 28;
+
+  if (speedKmh >= 20) tolerance = 35;
+  if (speedKmh >= 50) tolerance = 45;
+  if (speedKmh >= 80) tolerance = 55;
+
+  if (typeof accuracy === "number" && !Number.isNaN(accuracy)) {
+    tolerance = Math.max(tolerance, Math.min(accuracy * 1.4, 80));
+  }
+
+  return tolerance;
+}
+
+export default function MapView({
+  location,
+  destination,
+  onStepsUpdate,
+  recenterSignal = 0,
+}: MapViewProps) {
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  const mapObj = useRef<google.maps.Map | null>(null);
+  const directionsRenderer = useRef<google.maps.DirectionsRenderer | null>(null);
+  const trafficLayerRef = useRef<google.maps.TrafficLayer | null>(null);
+  const originMarkerRef = useRef<google.maps.Marker | null>(null);
+  const destinationMarkerRef = useRef<google.maps.Marker | null>(null);
+
+  const initializedRef = useRef(false);
+  const navigationReadyRef = useRef(false);
+
+  const lastRouteAtRef = useRef(0);
+  const offRouteStartedAtRef = useRef<number | null>(null);
+
+  const lastRouteDestinationRef = useRef<LatLngPoint | null>(null);
+
+  const routePathRef = useRef<LatLngPoint[]>([]);
+  const animatedCenterRef = useRef<LatLngPoint | null>(null);
+  const lastAnimatedAtRef = useRef(0);
+
+  const lastLocationForHeadingRef = useRef<LatLngPoint | null>(null);
+  const headingRef = useRef(0);
+  const markerHeadingRef = useRef(0);
+
+  const lastConfirmedOnRouteRef = useRef<LatLngPoint | null>(null);
+  const offRouteSampleCountRef = useRef(0);
+
+  const programmaticMoveRef = useRef(false);
+  const suppressManualUntilRef = useRef(0);
+  const followUserRef = useRef(true);
+
+  const [mapReady, setMapReady] = useState(false);
+  const [loadingMap, setLoadingMap] = useState(true);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [showRecenter, setShowRecenter] = useState(false);
+
+  function setProgrammaticCenter(center: LatLngPoint) {
+    if (!mapObj.current) return;
+    programmaticMoveRef.current = true;
+    suppressManualUntilRef.current = Date.now() + 1000;
+    mapObj.current.panTo(center);
+    animatedCenterRef.current = center;
+    lastAnimatedAtRef.current = Date.now();
+
+    window.setTimeout(() => {
+      programmaticMoveRef.current = false;
+    }, 250);
+  }
+
+  function focusNavigationCamera(
+    current: LatLngPoint,
+    heading = 0,
+    speed?: number | null
+  ) {
+    if (!mapObj.current) return;
+
+    const map = mapObj.current;
+
+    followUserRef.current = true;
+    setShowRecenter(false);
+    suppressManualUntilRef.current = Date.now() + 1200;
+    programmaticMoveRef.current = true;
+
+    map.setCenter(current);
+    map.setZoom(getNavigationZoom(speed));
+
+    if (typeof map.setTilt === "function") {
       try {
-        const res = await getNavigationQuickAccess();
-        setFavorites(Array.isArray(res?.favorites) ? res.favorites : []);
-        setRecent(Array.isArray(res?.recent) ? res.recent : []);
-      } catch (error) {
-        console.log("Erro ao carregar favoritos e recentes:", error);
+        map.setTilt(45);
+      } catch {
+        // ignore
       }
     }
 
-    loadQuickAccess();
-  }, []);
+    if (typeof map.setHeading === "function") {
+      try {
+        map.setHeading(heading);
+      } catch {
+        // ignore
+      }
+    }
+
+    animatedCenterRef.current = current;
+    lastAnimatedAtRef.current = Date.now();
+
+    window.setTimeout(() => {
+      programmaticMoveRef.current = false;
+    }, 300);
+  }
 
   useEffect(() => {
-    if (!navigator.geolocation) {
-      console.log("Geolocalização não suportada");
-      return;
-    }
+    let cancelled = false;
 
-    const acceptLocation = (nextLoc: DeviceLocation, force = false) => {
-      const now = Date.now();
-      const previous = lastAcceptedLocationRef.current;
-      const timeDiffMs = previous ? now - lastAcceptedAtRef.current : 0;
-
-      if (!force && !shouldAcceptLocationUpdate(previous, nextLoc, timeDiffMs)) {
-        return;
-      }
-
-      lastAcceptedLocationRef.current = nextLoc;
-      lastAcceptedAtRef.current = now;
-      setDeviceLocation(nextLoc);
-    };
-
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const loc: DeviceLocation = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy:
-            typeof pos.coords.accuracy === "number"
-              ? pos.coords.accuracy
-              : null,
-          speed:
-            typeof pos.coords.speed === "number" ? pos.coords.speed : null,
-        };
-
-        console.log("LOCALIZAÇÃO INICIAL:", loc);
-        if (isReasonableLocation(loc)) {
-          acceptLocation(loc, true);
+    async function initMap() {
+      try {
+        if (!location || !mapRef.current) {
+          setLoadingMap(false);
+          return;
         }
-      },
-      (error) => {
-        console.log("Erro localização inicial:", error);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 12000,
-        maximumAge: 0,
-      }
-    );
 
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const loc: DeviceLocation = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy:
-            typeof pos.coords.accuracy === "number"
-              ? pos.coords.accuracy
-              : null,
-          speed:
-            typeof pos.coords.speed === "number" ? pos.coords.speed : null,
+        if (initializedRef.current && mapObj.current) {
+          setMapReady(true);
+          setLoadingMap(false);
+          return;
+        }
+
+        setLoadingMap(true);
+        setErrorMessage("");
+
+        const google = await loadGoogleMapsScript();
+
+        if (cancelled || !mapRef.current) return;
+
+        const center = {
+          lat: location.latitude,
+          lng: location.longitude,
         };
 
-        console.log("LOCALIZAÇÃO ATUALIZADA:", loc);
-        acceptLocation(loc);
-      },
-      (error) => {
-        console.log("Erro geolocalização:", error);
-      },
-      {
-        enableHighAccuracy: true,
-        maximumAge: 0,
-        timeout: 12000,
-      }
-    );
+        const map = new google.maps.Map(mapRef.current, {
+          center,
+          zoom: 18,
+          tilt: 0,
+          heading: 0,
+          disableDefaultUI: false,
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: false,
+          zoomControl: true,
+          gestureHandling: "greedy",
+        });
 
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, []);
+        mapObj.current = map;
 
-  useEffect(() => {
-    const trimmed = input.trim();
+        trafficLayerRef.current = new google.maps.TrafficLayer();
+        trafficLayerRef.current.setMap(map);
 
-    if (debounceRef.current) {
-      window.clearTimeout(debounceRef.current);
-    }
+        directionsRenderer.current = new google.maps.DirectionsRenderer({
+          map,
+          suppressMarkers: true,
+          preserveViewport: true,
+          polylineOptions: {
+            strokeColor: "#2563eb",
+            strokeOpacity: 0.95,
+            strokeWeight: 7,
+          },
+        });
 
-    if (trimmed.length < 2 || !looksLikeNavigationInput(trimmed)) {
-      setSuggestions([]);
-      setIsSuggesting(false);
-      return;
-    }
+        originMarkerRef.current = new google.maps.Marker({
+          position: center,
+          map,
+          title: "Você",
+          icon: getCarSymbol(google, 0),
+          zIndex: 999,
+        });
 
-    debounceRef.current = window.setTimeout(async () => {
-      try {
-        setIsSuggesting(true);
+        map.addListener("dragstart", () => {
+          if (programmaticMoveRef.current) return;
+          if (Date.now() < suppressManualUntilRef.current) return;
+          if (!destination) return;
 
-        const res = await suggestNavigation(
-          trimmed,
-          deviceLocation,
-          sessionTokenRef.current
+          followUserRef.current = false;
+          setShowRecenter(true);
+        });
+
+        map.addListener("zoom_changed", () => {
+          if (programmaticMoveRef.current) return;
+          if (Date.now() < suppressManualUntilRef.current) return;
+          if (!destination) return;
+
+          followUserRef.current = false;
+          setShowRecenter(true);
+        });
+
+        map.addListener("idle", () => {
+          if (programmaticMoveRef.current) return;
+        });
+
+        animatedCenterRef.current = center;
+        lastLocationForHeadingRef.current = center;
+        lastConfirmedOnRouteRef.current = center;
+        initializedRef.current = true;
+        setMapReady(true);
+        setLoadingMap(false);
+
+        window.setTimeout(() => {
+          if (mapObj.current && window.google?.maps) {
+            window.google.maps.event.trigger(mapObj.current, "resize");
+          }
+        }, 150);
+      } catch (error: any) {
+        console.error("Erro ao iniciar Google Maps:", error);
+        setErrorMessage(
+          error?.message || "Não foi possível carregar o Google Maps."
         );
-
-        setSuggestions(Array.isArray(res?.suggestions) ? res.suggestions : []);
-      } catch (error) {
-        console.log("Erro ao buscar sugestões:", error);
-        setSuggestions([]);
-      } finally {
-        setIsSuggesting(false);
+        setLoadingMap(false);
+        setMapReady(false);
       }
-    }, 350);
+    }
+
+    initMap();
 
     return () => {
-      if (debounceRef.current) {
-        window.clearTimeout(debounceRef.current);
-      }
+      cancelled = true;
     };
-  }, [input, deviceLocation]);
+  }, [location, destination]);
 
-  const iniciarNavegacao = (dest: Destination) => {
-    if (!dest?.name) return;
-    console.log("Navegação interna iniciada:", dest);
-  };
+  useEffect(() => {
+    if (!location || !mapObj.current || !window.google) return;
 
-  async function refreshQuickAccess() {
-    try {
-      const res = await getNavigationQuickAccess();
-      setFavorites(Array.isArray(res?.favorites) ? res.favorites : []);
-      setRecent(Array.isArray(res?.recent) ? res.recent : []);
-    } catch (error) {
-      console.log("Erro ao atualizar favoritos e recentes:", error);
+    const google = window.google;
+    const current = {
+      lat: location.latitude,
+      lng: location.longitude,
+    };
+
+    const previousForHeading = lastLocationForHeadingRef.current;
+    const movedSinceHeadingRef = previousForHeading
+      ? calculateDistanceMeters(
+          previousForHeading.lat,
+          previousForHeading.lng,
+          current.lat,
+          current.lng
+        )
+      : 0;
+
+    if (previousForHeading && movedSinceHeadingRef >= 5) {
+      const rawBearing = calculateBearing(
+        previousForHeading.lat,
+        previousForHeading.lng,
+        current.lat,
+        current.lng
+      );
+
+      markerHeadingRef.current = smoothAngle(
+        markerHeadingRef.current,
+        rawBearing,
+        0.35
+      );
+
+      headingRef.current = smoothAngle(headingRef.current, rawBearing, 0.18);
+      lastLocationForHeadingRef.current = current;
+    } else if (!previousForHeading) {
+      lastLocationForHeadingRef.current = current;
     }
-  }
 
-  async function handleSend(messageOverride?: string) {
-    const trimmed = String(messageOverride ?? input).trim();
-    if (!trimmed) return;
+    if (originMarkerRef.current) {
+      originMarkerRef.current.setPosition(current);
+      originMarkerRef.current.setIcon(
+        getCarSymbol(google, markerHeadingRef.current)
+      );
+    }
 
-    console.log("ENVIANDO COM LOCALIZAÇÃO:", deviceLocation);
+    const map = mapObj.current;
+    const now = Date.now();
 
-    setSuggestions([]);
-    setIsSuggesting(false);
+    if (!destination) {
+      navigationReadyRef.current = false;
+      followUserRef.current = true;
+      setShowRecenter(false);
+      animatedCenterRef.current = current;
+      map.setCenter(current);
 
-    setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
-
-    try {
-      const res = await sendChatMessage(trimmed, deviceLocation);
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: res?.reply || "Mensagem recebida.",
-        },
-      ]);
-
-      if (res?.meta?.navigation?.active && res?.meta?.navigation?.destination) {
-        const nextDestination = res.meta.navigation.destination as Destination;
-
-        setDestination(nextDestination);
-        setSteps([]);
-        setShowMap(true);
-
-        setTimeout(() => {
-          iniciarNavegacao(nextDestination);
-        }, 500);
-
-        await refreshQuickAccess();
+      if ((map.getZoom() ?? 18) !== 18) {
+        map.setZoom(18);
       }
 
-      sessionTokenRef.current = generateSessionToken();
-    } catch (error) {
-      console.log("Erro ao enviar mensagem:", error);
+      if (typeof map.setHeading === "function") {
+        try {
+          map.setHeading(0);
+        } catch {
+          // ignore
+        }
+      }
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Erro ao processar sua solicitação.",
-        },
-      ]);
+      if (typeof map.setTilt === "function") {
+        try {
+          map.setTilt(0);
+        } catch {
+          // ignore
+        }
+      }
+
+      return;
     }
 
-    setInput("");
-  }
+    const targetZoom = getNavigationZoom(location.speed);
+    const currentZoom = map.getZoom() ?? targetZoom;
 
-  function handleSuggestionSelect(suggestion: NavigationSuggestion) {
-    setInput(suggestion.text);
-    setSuggestions([]);
-    handleSend(suggestion.text);
-  }
+    if (followUserRef.current) {
+      if (Math.abs(currentZoom - targetZoom) >= 1) {
+        suppressManualUntilRef.current = Date.now() + 800;
+        programmaticMoveRef.current = true;
+        map.setZoom(targetZoom);
+        window.setTimeout(() => {
+          programmaticMoveRef.current = false;
+        }, 200);
+      }
 
-  function handleQuickAccessClick(item: QuickAccessItem) {
-    const text = item.address || item.name || item.label || "";
-    if (!text) return;
+      if (typeof map.setTilt === "function") {
+        try {
+          map.setTilt(45);
+        } catch {
+          // ignore
+        }
+      }
 
-    setInput(text);
-    handleSend(text);
-  }
+      if (typeof map.setHeading === "function") {
+        try {
+          map.setHeading(headingRef.current);
+        } catch {
+          // ignore
+        }
+      }
 
-  function renderSuggestionBadge(type?: string) {
-    if (type === "favorite") return "⭐";
-    if (type === "recent") return "🕘";
-    return "📍";
-  }
+      const bounds = map.getBounds();
+      let projectedTarget = current;
+
+      if (bounds) {
+        const ne = bounds.getNorthEast();
+        const sw = bounds.getSouthWest();
+
+        const latSpan = Math.abs(ne.lat() - sw.lat());
+        const lngSpan = Math.abs(ne.lng() - sw.lng());
+
+        const headingRad = (headingRef.current * Math.PI) / 180;
+
+        const backwardOffsetLat = Math.cos(headingRad) * latSpan * 0.12;
+        const backwardOffsetLng = Math.sin(headingRad) * lngSpan * 0.12;
+
+        projectedTarget = {
+          lat: current.lat - backwardOffsetLat,
+          lng: current.lng - backwardOffsetLng,
+        };
+      }
+
+      const previousCenter = animatedCenterRef.current || projectedTarget;
+      const nextCenter = {
+        lat: lerp(previousCenter.lat, projectedTarget.lat, 0.22),
+        lng: lerp(previousCenter.lng, projectedTarget.lng, 0.22),
+      };
+
+      const movedCenter = calculateDistanceMeters(
+        previousCenter.lat,
+        previousCenter.lng,
+        nextCenter.lat,
+        nextCenter.lng
+      );
+
+      if (movedCenter >= 2 || now - lastAnimatedAtRef.current > 1100) {
+        setProgrammaticCenter(nextCenter);
+      }
+    }
+  }, [location, destination]);
+
+  useEffect(() => {
+    if (!recenterSignal || !location) return;
+
+    const current = {
+      lat: location.latitude,
+      lng: location.longitude,
+    };
+
+    focusNavigationCamera(current, headingRef.current, location.speed);
+  }, [recenterSignal, location]);
+
+  useEffect(() => {
+    if (
+      !mapReady ||
+      !location ||
+      !destination ||
+      !window.google ||
+      !mapObj.current ||
+      !directionsRenderer.current
+    ) {
+      return;
+    }
+
+    const google = window.google;
+    const now = Date.now();
+
+    const currentOrigin: LatLngPoint = {
+      lat: location.latitude,
+      lng: location.longitude,
+    };
+
+    const currentDestination: LatLngPoint = {
+      lat: destination.latitude,
+      lng: destination.longitude,
+    };
+
+    const previousDestination = lastRouteDestinationRef.current;
+    const destinationMoved = previousDestination
+      ? calculateDistanceMeters(
+          previousDestination.lat,
+          previousDestination.lng,
+          currentDestination.lat,
+          currentDestination.lng
+        )
+      : Number.MAX_SAFE_INTEGER;
+
+    const hasRoute = routePathRef.current.length > 0;
+    const routeNotLoaded = !navigationReadyRef.current || !hasRoute;
+
+    let shouldRecalculate = false;
+
+    if (routeNotLoaded) {
+      shouldRecalculate = true;
+    }
+
+    if (destinationMoved >= 5) {
+      shouldRecalculate = true;
+    }
+
+    if (hasRoute && !shouldRecalculate) {
+      const toleranceMeters = getDynamicToleranceMeters(
+        location.speed,
+        location.accuracy
+      );
+
+      const onRoute = isPointOnRoute(
+        google,
+        currentOrigin,
+        routePathRef.current,
+        toleranceMeters
+      );
+
+      if (onRoute) {
+        offRouteStartedAtRef.current = null;
+        offRouteSampleCountRef.current = 0;
+        lastConfirmedOnRouteRef.current = currentOrigin;
+      } else {
+        if (!offRouteStartedAtRef.current) {
+          offRouteStartedAtRef.current = now;
+          offRouteSampleCountRef.current = 1;
+        } else {
+          offRouteSampleCountRef.current += 1;
+        }
+
+        const offRouteDuration = now - offRouteStartedAtRef.current;
+        const referencePoint = lastConfirmedOnRouteRef.current;
+        const driftFromLastGoodPoint = referencePoint
+          ? calculateDistanceMeters(
+              referencePoint.lat,
+              referencePoint.lng,
+              currentOrigin.lat,
+              currentOrigin.lng
+            )
+          : 0;
+
+        const minDurationMs =
+          typeof location.speed === "number" && location.speed * 3.6 > 50
+            ? 3500
+            : 4500;
+
+        const minSamples = 3;
+        const minDriftMeters =
+          typeof location.accuracy === "number" && !Number.isNaN(location.accuracy)
+            ? Math.max(30, location.accuracy * 1.3)
+            : 35;
+
+        const confirmedOffRoute =
+          offRouteDuration >= minDurationMs &&
+          offRouteSampleCountRef.current >= minSamples &&
+          driftFromLastGoodPoint >= minDriftMeters;
+
+        if (confirmedOffRoute) {
+          const cooldownPassed = now - lastRouteAtRef.current >= 9000;
+          if (cooldownPassed) {
+            shouldRecalculate = true;
+          }
+        }
+      }
+    }
+
+    if (!shouldRecalculate) {
+      return;
+    }
+
+    lastRouteAtRef.current = now;
+    lastRouteDestinationRef.current = currentDestination;
+
+    const directionsService = new google.maps.DirectionsService();
+
+    directionsService.route(
+      {
+        origin: currentOrigin,
+        destination: currentDestination,
+        travelMode: google.maps.TravelMode.DRIVING,
+        provideRouteAlternatives: false,
+        drivingOptions: {
+          departureTime: new Date(),
+          trafficModel: google.maps.TrafficModel.BEST_GUESS,
+        },
+      },
+      (result, status) => {
+        if (status !== "OK" || !result || !result.routes?.length) {
+          console.error("Erro ao calcular rota:", status, result);
+          setErrorMessage(`Não foi possível calcular a rota (${status}).`);
+          return;
+        }
+
+        setErrorMessage("");
+
+        directionsRenderer.current?.setDirections(result);
+        directionsRenderer.current?.setRouteIndex(0);
+
+        const bestRoute = result.routes[0];
+        const bestLeg = bestRoute?.legs?.[0];
+
+        if (!bestLeg) return;
+
+        routePathRef.current = flattenOverviewPath(bestRoute);
+
+        const destinationPosition = {
+          lat: destination.latitude,
+          lng: destination.longitude,
+        };
+
+        if (!destinationMarkerRef.current) {
+          destinationMarkerRef.current = new google.maps.Marker({
+            position: destinationPosition,
+            map: mapObj.current,
+            title: destination.name || "Destino",
+          });
+        } else {
+          destinationMarkerRef.current.setPosition(destinationPosition);
+          destinationMarkerRef.current.setTitle(destination.name || "Destino");
+          destinationMarkerRef.current.setMap(mapObj.current);
+        }
+
+        focusNavigationCamera(currentOrigin, headingRef.current, location.speed);
+
+        navigationReadyRef.current = true;
+        offRouteStartedAtRef.current = null;
+        offRouteSampleCountRef.current = 0;
+        lastConfirmedOnRouteRef.current = currentOrigin;
+
+        const steps: Step[] = bestLeg.steps.map((step) => ({
+          instruction: step.instructions.replace(/<[^>]+>/g, ""),
+          end_location: {
+            lat: step.end_location.lat(),
+            lng: step.end_location.lng(),
+          },
+        }));
+
+        onStepsUpdate?.(steps);
+      }
+    );
+  }, [mapReady, location, destination, onStepsUpdate]);
+
+  useEffect(() => {
+    if (!destination) {
+      navigationReadyRef.current = false;
+      lastRouteAtRef.current = 0;
+      offRouteStartedAtRef.current = null;
+      offRouteSampleCountRef.current = 0;
+      lastRouteDestinationRef.current = null;
+      routePathRef.current = [];
+      animatedCenterRef.current = null;
+      lastLocationForHeadingRef.current = location
+        ? { lat: location.latitude, lng: location.longitude }
+        : null;
+      lastConfirmedOnRouteRef.current = location
+        ? { lat: location.latitude, lng: location.longitude }
+        : null;
+      headingRef.current = 0;
+      markerHeadingRef.current = 0;
+      followUserRef.current = true;
+      setShowRecenter(false);
+
+      if (directionsRenderer.current) {
+        directionsRenderer.current.set("directions", null);
+      }
+
+      if (destinationMarkerRef.current) {
+        destinationMarkerRef.current.setMap(null);
+        destinationMarkerRef.current = null;
+      }
+
+      if (originMarkerRef.current && window.google?.maps) {
+        originMarkerRef.current.setIcon(getCarSymbol(window.google, 0));
+      }
+
+      if (mapObj.current) {
+        if (typeof mapObj.current.setHeading === "function") {
+          try {
+            mapObj.current.setHeading(0);
+          } catch {
+            // ignore
+          }
+        }
+
+        if (typeof mapObj.current.setTilt === "function") {
+          try {
+            mapObj.current.setTilt(0);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+  }, [destination, location]);
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#343541" }}>
-      <aside
-        style={{
-          width: 260,
-          background: "#202123",
-          padding: 20,
-          color: "#fff",
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "space-between",
-          gap: 20,
-        }}
-      >
-        <div>
-          <h2>Megan OS</h2>
-          <p style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</p>
-
-          <div style={{ marginTop: 20 }}>
-            <h3 style={{ fontSize: 14, marginBottom: 10 }}>Favoritos</h3>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {favorites.map((item, index) => (
-                <button
-                  key={`${item.id || item.label || item.address}-${index}`}
-                  onClick={() => handleQuickAccessClick(item)}
-                  style={{
-                    textAlign: "left",
-                    background: "#2a2b32",
-                    color: "#fff",
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    cursor: "pointer",
-                    fontSize: 13,
-                  }}
-                >
-                  ⭐ {item.label || item.name}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ marginTop: 20 }}>
-            <h3 style={{ fontSize: 14, marginBottom: 10 }}>Recentes</h3>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {recent.length === 0 && (
-                <div style={{ fontSize: 12, opacity: 0.65 }}>
-                  Nenhum destino recente
-                </div>
-              )}
-
-              {recent.map((item, index) => (
-                <button
-                  key={`${item.name || item.address}-${index}`}
-                  onClick={() => handleQuickAccessClick(item)}
-                  style={{
-                    textAlign: "left",
-                    background: "#2a2b32",
-                    color: "#fff",
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    cursor: "pointer",
-                    fontSize: 13,
-                  }}
-                >
-                  🕘 {item.name || item.address}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <button
-          onClick={() => setShowMap((prev) => !prev)}
-          style={{
-            background: "#10a37f",
-            border: "none",
-            padding: 12,
-            borderRadius: 8,
-            color: "#fff",
-            cursor: "pointer",
-          }}
-        >
-          🗺️ {showMap ? "Fechar mapa" : "Abrir mapa"}
-        </button>
-      </aside>
-
-      <main
-        style={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "space-between",
-          position: "relative",
-        }}
-      >
-        <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-          {messages.map((m, i) => (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                justifyContent: m.role === "user" ? "flex-end" : "flex-start",
-                marginBottom: 10,
-              }}
-            >
-              <div
-                style={{
-                  background: m.role === "user" ? "#10a37f" : "#444654",
-                  padding: 12,
-                  borderRadius: 10,
-                  maxWidth: "60%",
-                  color: "#fff",
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                {m.content}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ padding: 20, borderTop: "1px solid #444", position: "relative" }}>
-          {(suggestions.length > 0 || isSuggesting) && (
-            <div
-              style={{
-                position: "absolute",
-                left: 20,
-                right: 20,
-                bottom: 84,
-                background: "#1f2937",
-                border: "1px solid rgba(255,255,255,0.12)",
-                borderRadius: 14,
-                boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
-                overflow: "hidden",
-                zIndex: 20,
-              }}
-            >
-              {isSuggesting && suggestions.length === 0 && (
-                <div
-                  style={{
-                    padding: 14,
-                    color: "#cbd5e1",
-                    fontSize: 14,
-                  }}
-                >
-                  Buscando sugestões...
-                </div>
-              )}
-
-              {suggestions.map((item, index) => (
-                <button
-                  key={`${item.text}-${index}`}
-                  onClick={() => handleSuggestionSelect(item)}
-                  style={{
-                    width: "100%",
-                    textAlign: "left",
-                    padding: "14px 16px",
-                    border: "none",
-                    borderBottom:
-                      index !== suggestions.length - 1
-                        ? "1px solid rgba(255,255,255,0.08)"
-                        : "none",
-                    background: "transparent",
-                    color: "#fff",
-                    cursor: "pointer",
-                    fontSize: 14,
-                  }}
-                >
-                  {renderSuggestionBadge(item.type)} {item.text}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <div style={{ display: "flex", gap: 10 }}>
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSend();
-              }}
-              placeholder="Digite uma mensagem ou peça navegação..."
-              style={{
-                flex: 1,
-                padding: 12,
-                borderRadius: 8,
-                border: "none",
-                outline: "none",
-              }}
-            />
-            <button
-              onClick={() => handleSend()}
-              style={{
-                background: "#10a37f",
-                border: "none",
-                padding: "0 20px",
-                borderRadius: 8,
-                color: "#fff",
-                cursor: "pointer",
-              }}
-            >
-              Enviar
-            </button>
-          </div>
-        </div>
-      </main>
-
-      {showMap && deviceLocation && (
+    <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      {loadingMap && (
         <div
           style={{
-            position: "fixed",
+            position: "absolute",
             inset: 0,
-            zIndex: 999,
+            zIndex: 2,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
             background: "#111827",
-            overflow: "hidden",
+            color: "#fff",
+            fontSize: 16,
+            fontWeight: 700,
           }}
         >
-          <div
-            style={{
-              position: "absolute",
-              top: 16,
-              right: 16,
-              zIndex: 1002,
-              display: "flex",
-              gap: 10,
-            }}
-          >
-            <button
-              onClick={() => setShowMap(false)}
-              style={{
-                background: "rgba(17,24,39,0.92)",
-                color: "#fff",
-                border: "1px solid rgba(255,255,255,0.12)",
-                borderRadius: 12,
-                padding: "10px 14px",
-                cursor: "pointer",
-                fontWeight: 700,
-                boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
-                backdropFilter: "blur(8px)",
-              }}
-            >
-              Fechar mapa
-            </button>
-          </div>
-
-          {destination && (
-            <div
-              style={{
-                position: "absolute",
-                top: 16,
-                left: 16,
-                zIndex: 1002,
-                width: 360,
-                maxWidth: "calc(100vw - 32px)",
-              }}
-            >
-              <DrivingMode
-                destination={destination}
-                steps={steps}
-                currentLocation={deviceLocation}
-              />
-            </div>
-          )}
-
-          <div style={{ width: "100%", height: "100%" }}>
-            <MapView
-              location={deviceLocation}
-              destination={destination}
-              onStepsUpdate={setSteps}
-            />
-          </div>
+          Carregando mapa...
         </div>
       )}
+
+      {errorMessage && (
+        <div
+          style={{
+            position: "absolute",
+            left: 16,
+            right: 16,
+            bottom: showRecenter ? 82 : 16,
+            zIndex: 3,
+            background: "rgba(127,29,29,0.95)",
+            color: "#fff",
+            padding: 14,
+            borderRadius: 12,
+            textAlign: "center",
+            fontSize: 14,
+            fontWeight: 700,
+            lineHeight: 1.5,
+          }}
+        >
+          {errorMessage}
+        </div>
+      )}
+
+      {!GOOGLE_MAPS_API_KEY && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            zIndex: 4,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#111827",
+            color: "#fff",
+            padding: 24,
+            textAlign: "center",
+            fontWeight: 700,
+          }}
+        >
+          Configure VITE_GOOGLE_MAPS_API_KEY no frontend para usar o Google Maps.
+        </div>
+      )}
+
+      {showRecenter && destination && (
+        <button
+          onClick={() => {
+            if (!location) return;
+            focusNavigationCamera(
+              { lat: location.latitude, lng: location.longitude },
+              headingRef.current,
+              location.speed
+            );
+          }}
+          style={{
+            position: "absolute",
+            right: 16,
+            bottom: 16,
+            zIndex: 5,
+            background: "rgba(17,24,39,0.94)",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 12,
+            padding: "12px 14px",
+            cursor: "pointer",
+            fontWeight: 700,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+            backdropFilter: "blur(8px)",
+          }}
+        >
+          Recentralizar
+        </button>
+      )}
+
+      <div
+        ref={mapRef}
+        style={{
+          width: "100%",
+          height: "100%",
+        }}
+      />
     </div>
   );
 }
