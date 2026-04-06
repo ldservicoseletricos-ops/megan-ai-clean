@@ -197,17 +197,17 @@ export default function MapView({
       },
       (result, status) => {
         if (status !== "OK" || !result || !result.routes?.length) {
-          console.error("Erro ao calcular rota:", status);
+          console.error("Erro ao calcular rota:", status, result);
           return;
         }
 
-        let bestRoute = result.routes[0];
+        let bestRouteIndex = 0;
         let bestDuration =
           result.routes[0].legs?.[0]?.duration_in_traffic?.value ??
           result.routes[0].legs?.[0]?.duration?.value ??
           Number.MAX_SAFE_INTEGER;
 
-        for (const route of result.routes) {
+        result.routes.forEach((route, index) => {
           const duration =
             route.legs?.[0]?.duration_in_traffic?.value ??
             route.legs?.[0]?.duration?.value ??
@@ -215,14 +215,17 @@ export default function MapView({
 
           if (duration < bestDuration) {
             bestDuration = duration;
-            bestRoute = route;
+            bestRouteIndex = index;
           }
-        }
-
-        directionsRenderer.current?.setDirections({
-          ...result,
-          routes: [bestRoute],
         });
+
+        directionsRenderer.current?.setDirections(result);
+        directionsRenderer.current?.setRouteIndex(bestRouteIndex);
+
+        const bestRoute = result.routes[bestRouteIndex];
+        const bestLeg = bestRoute?.legs?.[0];
+
+        if (!bestLeg) return;
 
         const destinationPosition = {
           lat: destination.latitude,
@@ -240,7 +243,15 @@ export default function MapView({
           destinationMarkerRef.current.setMap(mapObj.current);
         }
 
-        const steps: Step[] = bestRoute.legs[0].steps.map((step) => ({
+        const bounds = new google.maps.LatLngBounds();
+        bounds.extend({
+          lat: location.latitude,
+          lng: location.longitude,
+        });
+        bounds.extend(destinationPosition);
+        mapObj.current.fitBounds(bounds);
+
+        const steps: Step[] = bestLeg.steps.map((step) => ({
           instruction: step.instructions.replace(/<[^>]+>/g, ""),
           end_location: {
             lat: step.end_location.lat(),
