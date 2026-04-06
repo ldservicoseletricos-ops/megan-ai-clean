@@ -177,6 +177,7 @@ export default function MapView({
 
   const initializedRef = useRef(false);
   const navigationReadyRef = useRef(false);
+  const lastRouteAtRef = useRef(0);
 
   const lastRouteOriginRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastRouteDestinationRef = useRef<{ lat: number; lng: number } | null>(null);
@@ -200,10 +201,8 @@ export default function MapView({
     if (!mapObj.current) return;
 
     const map = mapObj.current;
-    const zoom = getNavigationZoom(speed);
-
     map.setCenter(current);
-    map.setZoom(zoom);
+    map.setZoom(getNavigationZoom(speed));
 
     if (typeof map.setTilt === "function") {
       try {
@@ -336,7 +335,7 @@ export default function MapView({
         )
       : 0;
 
-    if (previousForHeading && movedSinceHeadingRef >= 4) {
+    if (previousForHeading && movedSinceHeadingRef >= 5) {
       const rawBearing = calculateBearing(
         previousForHeading.lat,
         previousForHeading.lng,
@@ -347,10 +346,10 @@ export default function MapView({
       markerHeadingRef.current = smoothAngle(
         markerHeadingRef.current,
         rawBearing,
-        0.45
+        0.35
       );
 
-      headingRef.current = smoothAngle(headingRef.current, rawBearing, 0.22);
+      headingRef.current = smoothAngle(headingRef.current, rawBearing, 0.18);
       lastLocationForHeadingRef.current = current;
     } else if (!previousForHeading) {
       lastLocationForHeadingRef.current = current;
@@ -427,8 +426,8 @@ export default function MapView({
 
       const headingRad = (headingRef.current * Math.PI) / 180;
 
-      const backwardOffsetLat = Math.cos(headingRad) * latSpan * 0.14;
-      const backwardOffsetLng = Math.sin(headingRad) * lngSpan * 0.14;
+      const backwardOffsetLat = Math.cos(headingRad) * latSpan * 0.12;
+      const backwardOffsetLng = Math.sin(headingRad) * lngSpan * 0.12;
 
       projectedTarget = {
         lat: current.lat - backwardOffsetLat,
@@ -438,8 +437,8 @@ export default function MapView({
 
     const previousCenter = animatedCenterRef.current || projectedTarget;
     const nextCenter = {
-      lat: lerp(previousCenter.lat, projectedTarget.lat, 0.32),
-      lng: lerp(previousCenter.lng, projectedTarget.lng, 0.32),
+      lat: lerp(previousCenter.lat, projectedTarget.lat, 0.22),
+      lng: lerp(previousCenter.lng, projectedTarget.lng, 0.22),
     };
 
     const movedCenter = calculateDistanceMeters(
@@ -449,7 +448,7 @@ export default function MapView({
       nextCenter.lng
     );
 
-    if (movedCenter >= 1.2 || now - lastAnimatedAtRef.current > 850) {
+    if (movedCenter >= 2 || now - lastAnimatedAtRef.current > 1100) {
       map.panTo(nextCenter);
       animatedCenterRef.current = nextCenter;
       lastAnimatedAtRef.current = now;
@@ -465,6 +464,11 @@ export default function MapView({
       !mapObj.current ||
       !directionsRenderer.current
     ) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastRouteAtRef.current < 8000) {
       return;
     }
 
@@ -499,10 +503,16 @@ export default function MapView({
         )
       : Number.MAX_SAFE_INTEGER;
 
-    if (movedFromLastOrigin < 35 && movedDestination < 5) {
+    const shouldRecalculate =
+      !navigationReadyRef.current ||
+      movedFromLastOrigin >= 120 ||
+      movedDestination >= 5;
+
+    if (!shouldRecalculate) {
       return;
     }
 
+    lastRouteAtRef.current = now;
     lastRouteOriginRef.current = currentOrigin;
     lastRouteDestinationRef.current = currentDestination;
 
@@ -514,7 +524,7 @@ export default function MapView({
         origin: currentOrigin,
         destination: currentDestination,
         travelMode: google.maps.TravelMode.DRIVING,
-        provideRouteAlternatives: true,
+        provideRouteAlternatives: false,
         drivingOptions: {
           departureTime: new Date(),
           trafficModel: google.maps.TrafficModel.BEST_GUESS,
@@ -529,28 +539,10 @@ export default function MapView({
 
         setErrorMessage("");
 
-        let bestRouteIndex = 0;
-        let bestDuration =
-          result.routes[0].legs?.[0]?.duration_in_traffic?.value ??
-          result.routes[0].legs?.[0]?.duration?.value ??
-          Number.MAX_SAFE_INTEGER;
-
-        result.routes.forEach((route, index) => {
-          const duration =
-            route.legs?.[0]?.duration_in_traffic?.value ??
-            route.legs?.[0]?.duration?.value ??
-            Number.MAX_SAFE_INTEGER;
-
-          if (duration < bestDuration) {
-            bestDuration = duration;
-            bestRouteIndex = index;
-          }
-        });
-
         directionsRenderer.current?.setDirections(result);
-        directionsRenderer.current?.setRouteIndex(bestRouteIndex);
+        directionsRenderer.current?.setRouteIndex(0);
 
-        const bestRoute = result.routes[bestRouteIndex];
+        const bestRoute = result.routes[0];
         const bestLeg = bestRoute?.legs?.[0];
 
         if (!bestLeg) return;
@@ -593,6 +585,7 @@ export default function MapView({
   useEffect(() => {
     if (!destination) {
       navigationReadyRef.current = false;
+      lastRouteAtRef.current = 0;
       lastRouteOriginRef.current = null;
       lastRouteDestinationRef.current = null;
       animatedCenterRef.current = null;

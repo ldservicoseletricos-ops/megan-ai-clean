@@ -26,6 +26,32 @@ type DrivingModeProps = {
   currentLocation?: CurrentLocation;
 };
 
+function cleanInstruction(text: string) {
+  return String(text || "")
+    .replace(/<[^>]+>/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function haversineMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+) {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
 export default function DrivingMode({
   destination = null,
   steps = [],
@@ -35,27 +61,33 @@ export default function DrivingMode({
   const [eta, setEta] = useState("--");
   const [distance, setDistance] = useState("--");
   const [alert, setAlert] = useState<string | null>(null);
+  const [nextInstruction, setNextInstruction] = useState("Siga em frente");
 
   const stepIndexRef = useRef(0);
-  const warnedStepRef = useRef<number | null>(null);
+  const announcedPreviewRef = useRef<string>("");
+  const announcedNowRef = useRef<string>("");
   const lastRadarWarningRef = useRef(0);
   const lastBackendAlertRef = useRef("");
   const arrivalSpokenRef = useRef(false);
   const lastBackendSendRef = useRef(0);
+  const lastDistanceToStepRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!currentLocation) return;
 
-    if (typeof currentLocation.speed === "number" && !Number.isNaN(currentLocation.speed)) {
+    if (
+      typeof currentLocation.speed === "number" &&
+      !Number.isNaN(currentLocation.speed)
+    ) {
       const kmh = Math.max(0, Math.round(currentLocation.speed * 3.6));
       setSpeed(kmh);
 
       const now = Date.now();
 
-      if (kmh > 80 && now - lastRadarWarningRef.current > 12000) {
+      if (kmh > 80 && now - lastRadarWarningRef.current > 20000) {
         speak("Atenção, reduza a velocidade");
         lastRadarWarningRef.current = now;
-      } else if (kmh > 60 && kmh <= 80 && now - lastRadarWarningRef.current > 18000) {
+      } else if (kmh > 60 && kmh <= 80 && now - lastRadarWarningRef.current > 30000) {
         speak("Possível radar à frente");
         lastRadarWarningRef.current = now;
       }
@@ -70,7 +102,7 @@ export default function DrivingMode({
     const sendToBackend = async () => {
       try {
         const now = Date.now();
-        if (now - lastBackendSendRef.current < 3500) return;
+        if (now - lastBackendSendRef.current < 6000) return;
         lastBackendSendRef.current = now;
 
         const response = await sendLocationToBackend({
@@ -87,7 +119,7 @@ export default function DrivingMode({
           setAlert(response.alert);
 
           if (response.alert !== lastBackendAlertRef.current) {
-            speak(response.alert);
+            speak(response.alert, "high");
             lastBackendAlertRef.current = response.alert;
           }
         } else {
@@ -103,45 +135,92 @@ export default function DrivingMode({
   }, [currentLocation, destination]);
 
   useEffect(() => {
-    if (!currentLocation || steps.length === 0) return;
-
-    const stepIndex = stepIndexRef.current;
-    const step = steps[stepIndex];
-
-    if (!step) return;
-
-    const dist = Math.hypot(
-      currentLocation.latitude - step.end_location.lat,
-      currentLocation.longitude - step.end_location.lng
-    );
-
-    if (dist < 0.002 && warnedStepRef.current !== stepIndex) {
-      speak(`Em breve, ${step.instruction}`);
-      warnedStepRef.current = stepIndex;
-    }
-
-    if (dist < 0.0003) {
-      speak(step.instruction);
-      stepIndexRef.current += 1;
-      warnedStepRef.current = null;
-    }
-
-    if (dist < 0.0001 && !arrivalSpokenRef.current) {
-      speak("Você chegou ao destino");
-      arrivalSpokenRef.current = true;
-    }
-  }, [currentLocation, steps]);
-
-  useEffect(() => {
     if (!destination) {
       stepIndexRef.current = 0;
-      warnedStepRef.current = null;
+      announcedPreviewRef.current = "";
+      announcedNowRef.current = "";
       arrivalSpokenRef.current = false;
+      lastDistanceToStepRef.current = null;
       setEta("--");
       setDistance("--");
       setAlert(null);
+      setNextInstruction("Siga em frente");
+      return;
     }
   }, [destination]);
+
+  useEffect(() => {
+    if (!steps.length) {
+      setNextInstruction("Siga em frente");
+      return;
+    }
+
+    const currentStep = steps[stepIndexRef.current];
+    if (currentStep?.instruction) {
+      setNextInstruction(cleanInstruction(currentStep.instruction));
+    }
+  }, [steps]);
+
+  useEffect(() => {
+    if (!currentLocation || steps.length === 0) return;
+
+    const currentIndex = Math.min(stepIndexRef.current, steps.length - 1);
+    const step = steps[currentIndex];
+    if (!step) return;
+
+    const instruction = cleanInstruction(step.instruction);
+    setNextInstruction(instruction);
+
+    const distMeters = haversineMeters(
+      currentLocation.latitude,
+      currentLocation.longitude,
+      step.end_location.lat,
+      step.end_location.lng
+    );
+
+    const previousDistance = lastDistanceToStepRef.current;
+    lastDistanceToStepRef.current = distMeters;
+
+    const approaching =
+      previousDistance === null ? true : distMeters < previousDistance + 8;
+
+    if (
+      distMeters <= 180 &&
+      distMeters > 45 &&
+      approaching &&
+      announcedPreviewRef.current !== `${currentIndex}:${instruction}`
+    ) {
+      speak(`Em ${Math.round(distMeters / 10) * 10} metros, ${instruction}`);
+      announcedPreviewRef.current = `${currentIndex}:${instruction}`;
+    }
+
+    if (
+      distMeters <= 40 &&
+      approaching &&
+      announcedNowRef.current !== `${currentIndex}:${instruction}`
+    ) {
+      speak(instruction, "high");
+      announcedNowRef.current = `${currentIndex}:${instruction}`;
+    }
+
+    if (distMeters <= 18) {
+      if (stepIndexRef.current < steps.length - 1) {
+        stepIndexRef.current += 1;
+        announcedPreviewRef.current = "";
+        announcedNowRef.current = "";
+        lastDistanceToStepRef.current = null;
+
+        const nextStep = steps[stepIndexRef.current];
+        if (nextStep?.instruction) {
+          setNextInstruction(cleanInstruction(nextStep.instruction));
+        }
+      } else if (!arrivalSpokenRef.current) {
+        speak("Você chegou ao destino", "high");
+        arrivalSpokenRef.current = true;
+        setNextInstruction("Você chegou ao destino");
+      }
+    }
+  }, [currentLocation, steps]);
 
   return (
     <div
@@ -159,6 +238,21 @@ export default function DrivingMode({
         minWidth: "280px",
       }}
     >
+      <div
+        style={{
+          background: "rgba(255,255,255,0.06)",
+          borderRadius: 12,
+          padding: "12px 14px",
+        }}
+      >
+        <div style={{ fontSize: 12, opacity: 0.72, marginBottom: 6 }}>
+          Próxima instrução
+        </div>
+        <div style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.35 }}>
+          {nextInstruction}
+        </div>
+      </div>
+
       <div
         style={{
           display: "grid",

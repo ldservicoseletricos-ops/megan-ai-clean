@@ -1,67 +1,70 @@
-let lastSpoken = "";
-let lastTime = 0;
-let cachedVoice: SpeechSynthesisVoice | null = null;
+let lastSpokenText = "";
+let lastSpokenAt = 0;
+let lastQueueId = 0;
 
-function pickBestVoice(): SpeechSynthesisVoice | null {
-  const voices = window.speechSynthesis.getVoices();
-
-  if (!voices.length) return null;
-
-  return (
-    voices.find((v) => v.lang === "pt-BR" && /google|natural|neural|microsoft/i.test(v.name)) ||
-    voices.find((v) => v.lang === "pt-BR") ||
-    voices.find((v) => v.lang.startsWith("pt")) ||
-    voices[0] ||
-    null
-  );
+function normalizeText(value: string) {
+  return String(value || "")
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
-function ensureVoiceLoaded() {
-  if (!cachedVoice) {
-    cachedVoice = pickBestVoice();
+export function stopSpeaking() {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  window.speechSynthesis.cancel();
+}
+
+export function speak(text: string, priority: "normal" | "high" = "normal") {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  if (!text || !String(text).trim()) return;
+
+  const now = Date.now();
+  const normalized = normalizeText(text);
+
+  const repeatedTooSoon =
+    normalized === lastSpokenText &&
+    now - lastSpokenAt < 9000;
+
+  if (repeatedTooSoon) {
+    return;
   }
-}
 
-if (typeof window !== "undefined" && "speechSynthesis" in window) {
-  window.speechSynthesis.onvoiceschanged = () => {
-    cachedVoice = pickBestVoice();
-  };
-}
+  const queueId = ++lastQueueId;
 
-export function speak(text: string) {
-  try {
-    if (!text) return;
-    if (!("speechSynthesis" in window)) return;
+  if (priority === "high") {
+    window.speechSynthesis.cancel();
+  } else {
+    const speakingNow =
+      window.speechSynthesis.speaking || window.speechSynthesis.pending;
 
-    const normalized = String(text).trim();
-    if (!normalized) return;
+    if (speakingNow) {
+      return;
+    }
+  }
 
-    const now = Date.now();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = "pt-BR";
+  utterance.rate = 1.0;
+  utterance.pitch = 1.0;
+  utterance.volume = 1.0;
 
-    // evita repetir a mesma fala em sequência
-    if (normalized === lastSpoken && now - lastTime < 6000) {
+  utterance.onstart = () => {
+    if (queueId !== lastQueueId) {
+      window.speechSynthesis.cancel();
       return;
     }
 
-    lastSpoken = normalized;
-    lastTime = now;
+    lastSpokenText = normalized;
+    lastSpokenAt = Date.now();
+  };
 
-    ensureVoiceLoaded();
+  utterance.onerror = () => {
+    // evita travar o fluxo em erro de voz
+  };
 
-    const speech = new SpeechSynthesisUtterance(normalized);
-    speech.lang = "pt-BR";
-    speech.rate = 0.92;
-    speech.pitch = 1;
-    speech.volume = 1;
+  utterance.onend = () => {
+    // nada
+  };
 
-    if (cachedVoice) {
-      speech.voice = cachedVoice;
-      speech.lang = cachedVoice.lang || "pt-BR";
-    }
-
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(speech);
-  } catch (err) {
-    console.error("Erro ao falar:", err);
-  }
+  window.speechSynthesis.speak(utterance);
 }
