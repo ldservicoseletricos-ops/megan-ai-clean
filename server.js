@@ -96,6 +96,93 @@ function normalizeText(value) {
     .trim();
 }
 
+function isWeatherRequest(message) {
+  const normalized = normalizeText(message);
+
+  return [
+    "clima",
+    "tempo",
+    "temperatura",
+    "previsao",
+    "previsão",
+    "vai chover",
+    "como esta o clima",
+    "como está o clima",
+    "clima agora",
+    "qual o clima",
+  ].some((term) => normalized.includes(normalizeText(term)));
+}
+
+function normalizeLocationPayload(deviceLocation) {
+  if (!deviceLocation || typeof deviceLocation !== "object") return null;
+
+  const latitude = Number(deviceLocation.latitude);
+  const longitude = Number(deviceLocation.longitude);
+
+  if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+  };
+}
+
+function weatherCodeToText(code) {
+  const map = {
+    0: "céu limpo",
+    1: "predominantemente limpo",
+    2: "parcialmente nublado",
+    3: "nublado",
+    45: "neblina",
+    48: "neblina com geada",
+    51: "garoa leve",
+    53: "garoa moderada",
+    55: "garoa intensa",
+    61: "chuva leve",
+    63: "chuva moderada",
+    65: "chuva forte",
+    71: "neve leve",
+    73: "neve moderada",
+    75: "neve forte",
+    80: "pancadas de chuva leves",
+    81: "pancadas de chuva moderadas",
+    82: "pancadas de chuva fortes",
+    95: "trovoadas",
+  };
+
+  return map[code] || "condição não identificada";
+}
+
+async function getWeatherFromCoords(latitude, longitude) {
+  try {
+    const url =
+      `https://api.open-meteo.com/v1/forecast` +
+      `?latitude=${encodeURIComponent(latitude)}` +
+      `&longitude=${encodeURIComponent(longitude)}` +
+      `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m` +
+      `&timezone=auto`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+
+    const current = data?.current;
+    if (!current) return null;
+
+    return {
+      temperature: current.temperature_2m,
+      feelsLike: current.apparent_temperature,
+      windSpeed: current.wind_speed_10m,
+      weatherCode: current.weather_code,
+      weatherText: weatherCodeToText(current.weather_code),
+    };
+  } catch (err) {
+    console.log("Erro clima:", err);
+    return null;
+  }
+}
+
 function getKnownDestination(query) {
   const normalized = normalizeText(query);
 
@@ -195,7 +282,8 @@ app.get("/api/health", (_req, res) => {
 ========================= */
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, deviceLocation } = req.body;
+    const normalizedLocation = normalizeLocationPayload(deviceLocation);
 
     const nav = detectNavigationIntent(message);
 
@@ -224,6 +312,37 @@ app.post("/api/chat", async (req, res) => {
             destination: null,
           },
         },
+      });
+    }
+
+    if (isWeatherRequest(message)) {
+      if (!normalizedLocation) {
+        return res.json({
+          ok: true,
+          reply: "Para informar o clima, preciso da localização atual do aparelho.",
+        });
+      }
+
+      const weather = await getWeatherFromCoords(
+        normalizedLocation.latitude,
+        normalizedLocation.longitude
+      );
+
+      if (weather) {
+        return res.json({
+          ok: true,
+          reply:
+            `🌤️ Clima agora no seu local:\n` +
+            `Temperatura: ${weather.temperature}°C\n` +
+            `Sensação térmica: ${weather.feelsLike}°C\n` +
+            `Condição: ${weather.weatherText}\n` +
+            `Vento: ${weather.windSpeed} km/h`,
+        });
+      }
+
+      return res.json({
+        ok: true,
+        reply: "Não consegui acessar o clima agora. Tente novamente em instantes.",
       });
     }
 
