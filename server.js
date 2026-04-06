@@ -1,314 +1,559 @@
-import MapView from "./components/MapView";
-import DrivingMode from "./components/DrivingMode";
-import { useEffect, useState } from "react";
-import {
-  checkHealth,
-  sendChatMessage
-} from "./services/api";
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import fetch from "node-fetch";
+import { GoogleGenAI } from "@google/genai";
 
-type Message = {
-  role: "user" | "assistant";
-  content: string;
-};
+import navigationRouter from "./routes/navigation.route.js";
+import drivingRouter from "./routes/driving.route.js";
 
-type Step = {
-  instruction: string;
-  end_location: { lat: number; lng: number };
-};
+dotenv.config();
 
-export default function App() {
-  const [status, setStatus] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState("");
-  const [deviceLocation, setDeviceLocation] = useState<any>(null);
-  const [destination, setDestination] = useState<any>(null);
-  const [steps, setSteps] = useState<Step[]>([]);
-  const [showMap, setShowMap] = useState(false);
+/* =========================
+   CACHE GLOBAL
+========================= */
+const destinationCache = new Map();
 
-  useEffect(() => {
-    checkHealth().then(() => setStatus("Online"));
-  }, []);
+/* =========================
+   APP INIT
+========================= */
+const app = express();
+const PORT = process.env.PORT || 10000;
 
-  useEffect(() => {
-    if (!navigator.geolocation) {
-      console.log("Geolocalização não suportada");
-      return;
-    }
+/* =========================
+   GEMINI INIT
+========================= */
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const loc = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy ?? null,
+const ai = GEMINI_API_KEY
+  ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
+  : null;
+
+/* =========================
+   CORS
+========================= */
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "https://megan-ai-clean-wnst.vercel.app",
+  "https://hoppscotch.io",
+  process.env.FRONTEND_URL,
+].filter(Boolean);
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.some((allowed) => origin.startsWith(allowed))) {
+        return callback(null, true);
+      }
+
+      console.log("❌ CORS bloqueado:", origin);
+      return callback(new Error(`Not allowed by CORS: ${origin}`));
+    },
+    credentials: true,
+  })
+);
+
+app.use(express.json({ limit: "10mb" }));
+
+/* =========================
+   HELPERS
+========================= */
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+function cleanDestinationText(text) {
+  return String(text || "")
+    .replace(/^navegar para\s+/i, "")
+    .replace(/^navegar pra\s+/i, "")
+    .replace(/^ir para\s+/i, "")
+    .replace(/^ir pra\s+/i, "")
+    .replace(/^rota para\s+/i, "")
+    .replace(/^me leve para\s+/i, "")
+    .replace(/^abrir rota para\s+/i, "")
+    .replace(/^navegar\s+/i, "")
+    .replace(/^rota\s+/i, "")
+    .trim();
+}
+
+function detectNavigationIntent(message) {
+  const original = String(message || "").trim();
+  const text = normalizeText(original);
+
+  const patterns = [
+    "navegar para ",
+    "navegar pra ",
+    "ir para ",
+    "ir pra ",
+    "rota para ",
+    "me leve para ",
+    "abrir rota para ",
+    "navegar ",
+    "rota ",
+  ];
+
+  for (const pattern of patterns) {
+    if (text.startsWith(pattern)) {
+      const destinationText = cleanDestinationText(original);
+
+      if (destinationText) {
+        return {
+          isNavigationRequest: true,
+          destinationText,
         };
-
-        console.log("LOCALIZAÇÃO INICIAL:", loc);
-        setDeviceLocation(loc);
-      },
-      (error) => {
-        console.log("Erro localização inicial:", error);
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0,
       }
-    );
-
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const loc = {
-          latitude: pos.coords.latitude,
-          longitude: pos.coords.longitude,
-          accuracy: pos.coords.accuracy ?? null,
-        };
-
-        console.log("LOCALIZAÇÃO ATUALIZADA:", loc);
-        setDeviceLocation(loc);
-      },
-      (error) => {
-        console.log("Erro geolocalização:", error);
-      },
-      {
-        enableHighAccuracy: true,
-        maximumAge: 1000,
-        timeout: 10000,
-      }
-    );
-
-    return () => navigator.geolocation.clearWatch(watchId);
-  }, []);
-
-  const iniciarNavegacao = (dest: any) => {
-    if (!dest?.name) return;
-
-    const isMobile = /Android|iPhone/i.test(navigator.userAgent);
-
-    if (isMobile) {
-      window.location.href = `google.navigation:q=${encodeURIComponent(dest.name)}`;
-    } else {
-      const origin = deviceLocation
-        ? `${deviceLocation.latitude},${deviceLocation.longitude}`
-        : "";
-
-      const url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${encodeURIComponent(dest.name)}&travelmode=driving`;
-
-      window.open(url, "_blank");
     }
-  };
-
-  async function handleSend() {
-    const trimmed = input.trim();
-    if (!trimmed) return;
-
-    console.log("ENVIANDO COM LOCALIZAÇÃO:", deviceLocation);
-
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: trimmed },
-    ]);
-
-    try {
-      const res = await sendChatMessage(trimmed, deviceLocation);
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: res.reply,
-        },
-      ]);
-
-      if (res?.meta?.navigation?.active && res?.meta?.navigation?.destination) {
-        const nextDestination = res.meta.navigation.destination;
-
-        setDestination(nextDestination);
-        setSteps([]);
-        setShowMap(true);
-
-        setTimeout(() => {
-          iniciarNavegacao(nextDestination);
-        }, 800);
-      }
-    } catch (error) {
-      console.log("Erro ao enviar mensagem:", error);
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          content: "Erro ao processar sua solicitação.",
-        },
-      ]);
-    }
-
-    setInput("");
   }
 
+  return {
+    isNavigationRequest: false,
+    destinationText: "",
+  };
+}
+
+function isWeatherRequest(message) {
+  const normalized = normalizeText(message);
+
+  return [
+    "clima",
+    "tempo",
+    "temperatura",
+    "previsao",
+    "previsão",
+    "vai chover",
+    "clima agora",
+    "como esta o clima",
+    "como está o clima",
+    "qual o clima",
+    "como está o tempo",
+    "como esta o tempo",
+  ].some((term) => normalized.includes(normalizeText(term)));
+}
+
+function normalizeLocationPayload(deviceLocation) {
+  if (!deviceLocation || typeof deviceLocation !== "object") return null;
+
+  const latitude = Number(deviceLocation.latitude);
+  const longitude = Number(deviceLocation.longitude);
+
+  if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
+    return null;
+  }
+
+  return {
+    latitude,
+    longitude,
+    accuracy:
+      typeof deviceLocation.accuracy === "number"
+        ? deviceLocation.accuracy
+        : null,
+  };
+}
+
+function weatherCodeToText(code) {
+  const map = {
+    0: "céu limpo",
+    1: "predominantemente limpo",
+    2: "parcialmente nublado",
+    3: "nublado",
+    45: "neblina",
+    48: "neblina com geada",
+    51: "garoa leve",
+    53: "garoa moderada",
+    55: "garoa intensa",
+    56: "garoa congelante leve",
+    57: "garoa congelante intensa",
+    61: "chuva leve",
+    63: "chuva moderada",
+    65: "chuva forte",
+    66: "chuva congelante leve",
+    67: "chuva congelante forte",
+    71: "neve leve",
+    73: "neve moderada",
+    75: "neve forte",
+    77: "grãos de neve",
+    80: "pancadas de chuva leves",
+    81: "pancadas de chuva moderadas",
+    82: "pancadas de chuva fortes",
+    85: "pancadas de neve leves",
+    86: "pancadas de neve fortes",
+    95: "trovoadas",
+    96: "trovoadas com granizo leve",
+    99: "trovoadas com granizo forte",
+  };
+
+  return map[code] || "condição não identificada";
+}
+
+async function getWeatherFromCoords(latitude, longitude) {
+  try {
+    const url =
+      `https://api.open-meteo.com/v1/forecast` +
+      `?latitude=${encodeURIComponent(latitude)}` +
+      `&longitude=${encodeURIComponent(longitude)}` +
+      `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m` +
+      `&timezone=auto`;
+
+    const res = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("❌ Open-Meteo HTTP ERROR:", res.status, text);
+      return null;
+    }
+
+    const data = await res.json();
+    const current = data?.current;
+
+    if (!current) {
+      console.error("❌ Open-Meteo sem current:", data);
+      return null;
+    }
+
+    return {
+      temperature: current.temperature_2m,
+      feelsLike: current.apparent_temperature,
+      windSpeed: current.wind_speed_10m,
+      humidity: current.relative_humidity_2m,
+      weatherCode: current.weather_code,
+      weatherText: weatherCodeToText(current.weather_code),
+      time: current.time || null,
+    };
+  } catch (err) {
+    console.error("❌ Erro clima:", err);
+    return null;
+  }
+}
+
+function buildWeatherReply(weather) {
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#343541" }}>
-      <aside
-        style={{
-          width: 260,
-          background: "#202123",
-          padding: 20,
-          color: "#fff",
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "space-between",
-        }}
-      >
-        <div>
-          <h2>Megan OS</h2>
-          <p style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</p>
-        </div>
-
-        <button
-          onClick={() => setShowMap((prev) => !prev)}
-          style={{
-            background: "#10a37f",
-            border: "none",
-            padding: 12,
-            borderRadius: 8,
-            color: "#fff",
-            cursor: "pointer",
-          }}
-        >
-          🗺️ {showMap ? "Fechar mapa" : "Abrir mapa"}
-        </button>
-      </aside>
-
-      <main
-        style={{
-          flex: 1,
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "space-between",
-        }}
-      >
-        <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-          {messages.map((m, i) => (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                justifyContent: m.role === "user" ? "flex-end" : "flex-start",
-                marginBottom: 10,
-              }}
-            >
-              <div
-                style={{
-                  background: m.role === "user" ? "#10a37f" : "#444654",
-                  padding: 12,
-                  borderRadius: 10,
-                  maxWidth: "60%",
-                  color: "#fff",
-                  whiteSpace: "pre-wrap",
-                }}
-              >
-                {m.content}
-              </div>
-            </div>
-          ))}
-        </div>
-
-        <div style={{ padding: 20, borderTop: "1px solid #444" }}>
-          <div style={{ display: "flex", gap: 10 }}>
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleSend();
-              }}
-              placeholder="Digite uma mensagem ou peça navegação..."
-              style={{
-                flex: 1,
-                padding: 12,
-                borderRadius: 8,
-                border: "none",
-                outline: "none",
-              }}
-            />
-            <button
-              onClick={handleSend}
-              style={{
-                background: "#10a37f",
-                border: "none",
-                padding: "0 20px",
-                borderRadius: 8,
-                color: "#fff",
-                cursor: "pointer",
-              }}
-            >
-              Enviar
-            </button>
-          </div>
-        </div>
-      </main>
-
-      {showMap && deviceLocation && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 999,
-            background: "#111827",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              position: "absolute",
-              top: 16,
-              right: 16,
-              zIndex: 1002,
-              display: "flex",
-              gap: 10,
-            }}
-          >
-            <button
-              onClick={() => setShowMap(false)}
-              style={{
-                background: "rgba(17,24,39,0.92)",
-                color: "#fff",
-                border: "1px solid rgba(255,255,255,0.12)",
-                borderRadius: 12,
-                padding: "10px 14px",
-                cursor: "pointer",
-                fontWeight: 700,
-                boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
-                backdropFilter: "blur(8px)",
-              }}
-            >
-              Fechar mapa
-            </button>
-          </div>
-
-          {destination && (
-            <div
-              style={{
-                position: "absolute",
-                top: 16,
-                left: 16,
-                zIndex: 1002,
-                width: 360,
-                maxWidth: "calc(100vw - 32px)",
-              }}
-            >
-              <DrivingMode destination={destination} steps={steps} />
-            </div>
-          )}
-
-          <div style={{ width: "100%", height: "100%" }}>
-            <MapView
-              location={deviceLocation}
-              destination={destination}
-              onStepsUpdate={setSteps}
-            />
-          </div>
-        </div>
-      )}
-    </div>
+    `🌤️ Clima agora no seu local:\n` +
+    `Temperatura: ${weather.temperature}°C\n` +
+    `Sensação térmica: ${weather.feelsLike}°C\n` +
+    `Condição: ${weather.weatherText}\n` +
+    `Umidade: ${weather.humidity}%\n` +
+    `Vento: ${weather.windSpeed} km/h`
   );
 }
+
+function getKnownDestination(query) {
+  const normalized = normalizeText(query);
+
+  if (
+    normalized.includes("praca da moca") ||
+    normalized.includes("paraca da moca") ||
+    normalized.includes("praca moca") ||
+    normalized.includes("moca diadema") ||
+    normalized.includes("praca da moca diadema") ||
+    normalized.includes("paraca da moca diadema")
+  ) {
+    return {
+      latitude: -23.688958,
+      longitude: -46.625296,
+      name: "Praça da Moça, Centro, Diadema - SP",
+    };
+  }
+
+  return null;
+}
+
+async function geocodeDestination(query) {
+  const cleaned = cleanDestinationText(query);
+  const normalized = normalizeText(cleaned);
+
+  if (!normalized) return null;
+
+  if (destinationCache.has(normalized)) {
+    return destinationCache.get(normalized);
+  }
+
+  const known = getKnownDestination(normalized);
+  if (known) {
+    destinationCache.set(normalized, known);
+    return known;
+  }
+
+  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+
+  if (!googleMapsApiKey) {
+    console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
+    return null;
+  }
+
+  try {
+    const url =
+      `https://maps.googleapis.com/maps/api/geocode/json` +
+      `?address=${encodeURIComponent(cleaned)}` +
+      `&key=${encodeURIComponent(googleMapsApiKey)}` +
+      `&region=br` +
+      `&language=pt-BR`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (data?.status === "OK" && Array.isArray(data.results) && data.results.length > 0) {
+      const result = data.results[0];
+
+      const location = {
+        latitude: Number(result.geometry.location.lat),
+        longitude: Number(result.geometry.location.lng),
+        name: result.formatted_address,
+      };
+
+      destinationCache.set(normalized, location);
+      return location;
+    }
+
+    console.log("⚠️ Google Geocoding sem resultado direto:", data?.status, cleaned);
+  } catch (err) {
+    console.log("Erro geocode Google:", err);
+  }
+
+  try {
+    const fallbackQuery = `${cleaned}, São Paulo, Brasil`;
+
+    const fallbackUrl =
+      `https://maps.googleapis.com/maps/api/geocode/json` +
+      `?address=${encodeURIComponent(fallbackQuery)}` +
+      `&key=${encodeURIComponent(googleMapsApiKey)}` +
+      `&region=br` +
+      `&language=pt-BR`;
+
+    const fallbackRes = await fetch(fallbackUrl);
+    const fallbackData = await fallbackRes.json();
+
+    if (
+      fallbackData?.status === "OK" &&
+      Array.isArray(fallbackData.results) &&
+      fallbackData.results.length > 0
+    ) {
+      const result = fallbackData.results[0];
+
+      const location = {
+        latitude: Number(result.geometry.location.lat),
+        longitude: Number(result.geometry.location.lng),
+        name: result.formatted_address,
+      };
+
+      destinationCache.set(normalized, location);
+      return location;
+    }
+
+    console.log("⚠️ Google Geocoding sem resultado fallback:", fallbackData?.status, fallbackQuery);
+  } catch (err) {
+    console.log("Erro fallback geocode Google:", err);
+  }
+
+  return null;
+}
+
+function calculateDistanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+/* =========================
+   HEALTH
+========================= */
+app.get("/api/health", (_req, res) => {
+  res.json({ ok: true });
+});
+
+/* =========================
+   CHAT
+========================= */
+app.post("/api/chat", async (req, res) => {
+  try {
+    const { message, deviceLocation } = req.body || {};
+    const normalizedLocation = normalizeLocationPayload(deviceLocation);
+    const text = String(message || "").trim();
+
+    if (!text) {
+      return res.status(400).json({
+        ok: false,
+        error: "Mensagem obrigatória",
+      });
+    }
+
+    const nav = detectNavigationIntent(text);
+
+    if (nav.isNavigationRequest) {
+      const destination = await geocodeDestination(nav.destinationText);
+
+      if (destination) {
+        return res.json({
+          ok: true,
+          reply: `🚗 Iniciando navegação para ${destination.name}`,
+          meta: {
+            navigation: {
+              active: true,
+              destination,
+            },
+          },
+        });
+      }
+
+      return res.json({
+        ok: true,
+        reply: `Entendi o destino "${nav.destinationText}", mas não consegui localizar esse lugar com precisão. Tente enviar o nome com cidade e estado.`,
+        meta: {
+          navigation: {
+            active: false,
+            destination: null,
+          },
+        },
+      });
+    }
+
+    if (isWeatherRequest(text)) {
+      if (!normalizedLocation) {
+        return res.json({
+          ok: true,
+          reply: "Para informar o clima, preciso da localização atual do aparelho.",
+        });
+      }
+
+      const weather = await getWeatherFromCoords(
+        normalizedLocation.latitude,
+        normalizedLocation.longitude
+      );
+
+      if (weather) {
+        return res.json({
+          ok: true,
+          reply: buildWeatherReply(weather),
+        });
+      }
+
+      return res.json({
+        ok: true,
+        reply: "Não consegui acessar o clima agora. Tente novamente em instantes.",
+      });
+    }
+
+    if (ai) {
+      try {
+        const response = await ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: text,
+        });
+
+        const reply =
+          response?.text ||
+          response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+          "Mensagem recebida";
+
+        return res.json({
+          ok: true,
+          reply,
+        });
+      } catch (err) {
+        console.error("Erro Gemini:", err);
+      }
+    }
+
+    return res.json({
+      ok: true,
+      reply: "Mensagem recebida",
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, error: "Erro interno no chat" });
+  }
+});
+
+/* =========================
+   DRIVING
+========================= */
+app.post("/api/driving", async (req, res) => {
+  try {
+    const { latitude, longitude, speed, destination } = req.body || {};
+
+    const lat = Number(latitude);
+    const lng = Number(longitude);
+    const currentSpeed = typeof speed === "number" ? speed : Number(speed);
+
+    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+      return res.status(400).json({
+        ok: false,
+        error: "latitude e longitude são obrigatórios",
+      });
+    }
+
+    let distance = "--";
+    let eta = "--";
+
+    if (
+      destination &&
+      typeof destination === "object" &&
+      !Number.isNaN(Number(destination.latitude)) &&
+      !Number.isNaN(Number(destination.longitude))
+    ) {
+      const distanceKm = calculateDistanceKm(
+        lat,
+        lng,
+        Number(destination.latitude),
+        Number(destination.longitude)
+      );
+
+      distance = `${distanceKm.toFixed(2)} km`;
+
+      const speedKmh =
+        !Number.isNaN(currentSpeed) && currentSpeed > 0
+          ? currentSpeed * 3.6
+          : 40;
+
+      const minutes = Math.max(1, Math.round((distanceKm / speedKmh) * 60));
+      eta = `${minutes} min`;
+    }
+
+    return res.json({
+      ok: true,
+      alert: null,
+      distance,
+      eta,
+    });
+  } catch (error) {
+    console.error("Erro no /api/driving:", error);
+    return res.status(500).json({
+      ok: false,
+      error: "Erro ao processar modo direção",
+    });
+  }
+});
+
+/* =========================
+   ROTAS PROFISSIONAIS
+========================= */
+app.use("/api/driving/radar", drivingRouter);
+app.use("/api/navigation", navigationRouter);
+
+/* =========================
+   START
+========================= */
+app.listen(PORT, () => {
+  console.log("🚀 Megan OS rodando na porta", PORT);
+});
