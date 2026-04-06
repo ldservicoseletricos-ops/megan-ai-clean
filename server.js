@@ -276,9 +276,7 @@ async function getWeatherFromCoords(latitude, longitude) {
       `&timezone=auto`;
 
     const res = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-      },
+      headers: { Accept: "application/json" },
     });
 
     if (!res.ok) {
@@ -421,8 +419,6 @@ async function googleGeocode(address) {
     return null;
   }
 
-  console.log("🔎 Geocode:", address);
-
   const url =
     `https://maps.googleapis.com/maps/api/geocode/json` +
     `?address=${encodeURIComponent(address)}` +
@@ -447,7 +443,6 @@ async function googleGeocode(address) {
     };
   }
 
-  console.log("⚠️ Google Geocoding sem resultado:", data?.status, address);
   return null;
 }
 
@@ -712,14 +707,12 @@ function buildLocalSuggestionCandidates(input) {
       type: "favorite",
       address: item.address,
     });
-
     localCandidates.push({
       text: item.label,
       placeId: "",
       type: "favorite",
       address: item.address,
     });
-
     localCandidates.push({
       text: item.address,
       placeId: "",
@@ -774,14 +767,157 @@ function buildLocalSuggestionCandidates(input) {
   return unique;
 }
 
+async function fetchAutocompleteNew(input, deviceLocation, sessionToken) {
+  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+  if (!googleMapsApiKey) return [];
+
+  const body = {
+    input,
+    languageCode: "pt-BR",
+    regionCode: "BR",
+    includedRegionCodes: ["br"],
+    sessionToken: sessionToken || undefined,
+    includeQueryPredictions: false,
+  };
+
+  const normalizedLocation = normalizeLocationPayload(deviceLocation);
+
+  if (normalizedLocation) {
+    body.locationBias = {
+      circle: {
+        center: {
+          latitude: normalizedLocation.latitude,
+          longitude: normalizedLocation.longitude,
+        },
+        radius: 50000,
+      },
+    };
+
+    body.origin = {
+      latitude: normalizedLocation.latitude,
+      longitude: normalizedLocation.longitude,
+    };
+  }
+
+  try {
+    const res = await fetch("https://places.googleapis.com/v1/places:autocomplete", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": googleMapsApiKey,
+        "X-Goog-FieldMask":
+          "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text,suggestions.placePrediction.distanceMeters",
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await res.json();
+
+    if (!res.ok) {
+      console.error("❌ Autocomplete New HTTP ERROR:", res.status, data);
+      return [];
+    }
+
+    if (!Array.isArray(data?.suggestions)) {
+      return [];
+    }
+
+    return data.suggestions
+      .map((item) => {
+        const prediction = item?.placePrediction;
+        const text = prediction?.text?.text || "";
+        const placeId = prediction?.placeId || "";
+        const distance =
+          typeof prediction?.distanceMeters === "number"
+            ? prediction.distanceMeters / 1000
+            : null;
+
+        if (!text) return null;
+
+        return {
+          text,
+          placeId,
+          type: "google",
+          address: text,
+          distance,
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    console.error("❌ Erro Autocomplete New:", error);
+    return [];
+  }
+}
+
+async function fetchAutocompleteLegacy(input, deviceLocation, sessionToken) {
+  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+  if (!googleMapsApiKey) return [];
+
+  const normalizedLocation = normalizeLocationPayload(deviceLocation);
+
+  const params = new URLSearchParams({
+    input,
+    key: googleMapsApiKey,
+    language: "pt-BR",
+    components: "country:br",
+    sessiontoken: sessionToken || "",
+    types: "geocode",
+  });
+
+  if (normalizedLocation) {
+    params.set(
+      "location",
+      `${normalizedLocation.latitude},${normalizedLocation.longitude}`
+    );
+    params.set("radius", "50000");
+  }
+
+  try {
+    const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${params.toString()}`;
+    const res = await fetch(url);
+    const data = await res.json();
+
+    if (data?.status !== "OK" && data?.status !== "ZERO_RESULTS") {
+      console.error("❌ Autocomplete Legacy ERROR:", data?.status, data);
+      return [];
+    }
+
+    if (!Array.isArray(data?.predictions)) {
+      return [];
+    }
+
+    return data.predictions
+      .map((item) => {
+        const text = item?.description || "";
+        const placeId = item?.place_id || "";
+
+        if (!text) return null;
+
+        return {
+          text,
+          placeId,
+          type: "google",
+          address: text,
+          distance: null,
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    console.error("❌ Erro Autocomplete Legacy:", error);
+    return [];
+  }
+}
+
 async function rankSuggestionsByPriority(items, deviceLocation) {
   const normalizedLocation = normalizeLocationPayload(deviceLocation);
 
   const ranked = await Promise.all(
     items.map(async (item) => {
-      let distance = null;
+      let distance =
+        typeof item.distance === "number" ? item.distance : null;
 
       if (
+        distance == null &&
         normalizedLocation &&
         item.address &&
         item.type !== "google"
@@ -806,9 +942,9 @@ async function rankSuggestionsByPriority(items, deviceLocation) {
 
   const priority = {
     favorite: 0,
-    known: 1,
-    recent: 2,
-    google: 3,
+    google: 1,
+    known: 2,
+    recent: 3,
   };
 
   ranked.sort((a, b) => {
@@ -832,81 +968,27 @@ async function rankSuggestionsByPriority(items, deviceLocation) {
    AUTOCOMPLETE GOOGLE PLACES
 ========================= */
 async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionToken) {
-  const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
   const cleanedInput = String(input || "").trim();
 
   if (cleanedInput.length < 2) return [];
 
-  const localFallback = buildLocalSuggestionCandidates(cleanedInput);
+  const localSuggestions = buildLocalSuggestionCandidates(cleanedInput);
 
-  let googleSuggestions = [];
+  let googleSuggestions = await fetchAutocompleteNew(
+    cleanedInput,
+    deviceLocation,
+    sessionToken
+  );
 
-  if (googleMapsApiKey) {
-    const body = {
-      input: cleanedInput,
-      languageCode: "pt-BR",
-      regionCode: "BR",
-      includedRegionCodes: ["br"],
-      sessionToken: sessionToken || undefined,
-      includeQueryPredictions: false,
-    };
-
-    const normalizedLocation = normalizeLocationPayload(deviceLocation);
-
-    if (normalizedLocation) {
-      body.locationBias = {
-        circle: {
-          center: {
-            latitude: normalizedLocation.latitude,
-            longitude: normalizedLocation.longitude,
-          },
-          radius: 50000,
-        },
-      };
-    }
-
-    try {
-      const res = await fetch("https://places.googleapis.com/v1/places:autocomplete", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Goog-Api-Key": googleMapsApiKey,
-          "X-Goog-FieldMask":
-            "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text",
-        },
-        body: JSON.stringify(body),
-      });
-
-      const data = await res.json();
-
-      if (!res.ok) {
-        console.error("❌ Places Autocomplete HTTP ERROR:", res.status, data);
-      } else if (Array.isArray(data?.suggestions)) {
-        googleSuggestions = data.suggestions
-          .map((item) => {
-            const prediction = item?.placePrediction;
-            const text = prediction?.text?.text || "";
-            const placeId = prediction?.placeId || "";
-
-            if (!text) return null;
-
-            return {
-              text,
-              placeId,
-              type: "google",
-              address: text,
-            };
-          })
-          .filter(Boolean);
-      }
-    } catch (error) {
-      console.error("❌ Erro autocomplete Google Places:", error);
-    }
-  } else {
-    console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
+  if (googleSuggestions.length === 0) {
+    googleSuggestions = await fetchAutocompleteLegacy(
+      cleanedInput,
+      deviceLocation,
+      sessionToken
+    );
   }
 
-  const merged = [...localFallback, ...googleSuggestions];
+  const merged = [...localSuggestions, ...googleSuggestions];
   const unique = [];
   const seen = new Set();
 
