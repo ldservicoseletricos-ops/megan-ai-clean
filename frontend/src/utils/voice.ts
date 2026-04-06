@@ -1,6 +1,7 @@
 let lastSpokenText = "";
 let lastSpokenAt = 0;
 let lastQueueId = 0;
+let muted = false;
 
 function normalizeText(value: string) {
   return String(value || "")
@@ -9,12 +10,31 @@ function normalizeText(value: string) {
     .replace(/\s+/g, " ");
 }
 
+export function isVoiceMuted() {
+  return muted;
+}
+
+export function setVoiceMuted(value: boolean) {
+  muted = Boolean(value);
+
+  if (muted && typeof window !== "undefined" && "speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+  }
+}
+
+export function toggleVoiceMuted() {
+  const next = !muted;
+  setVoiceMuted(next);
+  return next;
+}
+
 export function stopSpeaking() {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
   window.speechSynthesis.cancel();
 }
 
 export function speak(text: string, priority: "normal" | "high" = "normal") {
+  if (muted) return;
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
   if (!text || !String(text).trim()) return;
 

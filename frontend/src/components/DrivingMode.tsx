@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { sendLocationToBackend } from "../services/driving.service";
-import { speak } from "../utils/voice";
+import {
+  isVoiceMuted,
+  setVoiceMuted,
+  speak,
+  stopSpeaking,
+} from "../utils/voice";
 
 type Destination = {
   latitude: number;
@@ -105,6 +110,7 @@ export default function DrivingMode({
   const [alert, setAlert] = useState<string | null>(null);
   const [nextInstruction, setNextInstruction] = useState("Siga em frente");
   const [nextDistance, setNextDistance] = useState<string>("");
+  const [voiceMuted, setVoiceMutedState] = useState(isVoiceMuted());
 
   const stepIndexRef = useRef(0);
   const spokenPreviewRef = useRef<Set<string>>(new Set());
@@ -126,6 +132,22 @@ export default function DrivingMode({
         .filter((step) => step.instruction && step.end_location),
     [steps]
   );
+
+  function handleToggleVoice() {
+    const next = !voiceMuted;
+    setVoiceMuted(next);
+    setVoiceMutedState(next);
+
+    if (next) {
+      stopSpeaking();
+    } else {
+      speak("Voz ativada");
+    }
+  }
+
+  useEffect(() => {
+    setVoiceMutedState(isVoiceMuted());
+  }, []);
 
   useEffect(() => {
     if (!currentLocation) return;
@@ -309,6 +331,35 @@ export default function DrivingMode({
         minWidth: "280px",
       }}
     >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+        }}
+      >
+        <div style={{ fontSize: 12, opacity: 0.72 }}>
+          Navegação por voz
+        </div>
+
+        <button
+          onClick={handleToggleVoice}
+          style={{
+            background: voiceMuted ? "rgba(153,27,27,0.95)" : "rgba(6,95,70,0.95)",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 10,
+            padding: "8px 12px",
+            cursor: "pointer",
+            fontWeight: 700,
+            fontSize: 12,
+          }}
+        >
+          {voiceMuted ? "Som mutado" : "Som ligado"}
+        </button>
+      </div>
+
       <div
         style={{
           background: "rgba(255,255,255,0.06)",

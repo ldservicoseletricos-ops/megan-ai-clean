@@ -29,6 +29,7 @@ type MapViewProps = {
     name?: string;
   } | null;
   onStepsUpdate?: (steps: Step[]) => void;
+  recenterSignal?: number;
 };
 
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
@@ -228,6 +229,7 @@ export default function MapView({
   location,
   destination,
   onStepsUpdate,
+  recenterSignal = 0,
 }: MapViewProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
   const mapObj = useRef<google.maps.Map | null>(null);
@@ -255,9 +257,27 @@ export default function MapView({
   const lastConfirmedOnRouteRef = useRef<LatLngPoint | null>(null);
   const offRouteSampleCountRef = useRef(0);
 
+  const programmaticMoveRef = useRef(false);
+  const suppressManualUntilRef = useRef(0);
+  const followUserRef = useRef(true);
+
   const [mapReady, setMapReady] = useState(false);
   const [loadingMap, setLoadingMap] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
+  const [showRecenter, setShowRecenter] = useState(false);
+
+  function setProgrammaticCenter(center: LatLngPoint) {
+    if (!mapObj.current) return;
+    programmaticMoveRef.current = true;
+    suppressManualUntilRef.current = Date.now() + 1000;
+    mapObj.current.panTo(center);
+    animatedCenterRef.current = center;
+    lastAnimatedAtRef.current = Date.now();
+
+    window.setTimeout(() => {
+      programmaticMoveRef.current = false;
+    }, 250);
+  }
 
   function focusNavigationCamera(
     current: LatLngPoint,
@@ -267,6 +287,12 @@ export default function MapView({
     if (!mapObj.current) return;
 
     const map = mapObj.current;
+
+    followUserRef.current = true;
+    setShowRecenter(false);
+    suppressManualUntilRef.current = Date.now() + 1200;
+    programmaticMoveRef.current = true;
+
     map.setCenter(current);
     map.setZoom(getNavigationZoom(speed));
 
@@ -287,6 +313,11 @@ export default function MapView({
     }
 
     animatedCenterRef.current = current;
+    lastAnimatedAtRef.current = Date.now();
+
+    window.setTimeout(() => {
+      programmaticMoveRef.current = false;
+    }, 300);
   }
 
   useEffect(() => {
@@ -354,6 +385,24 @@ export default function MapView({
           zIndex: 999,
         });
 
+        map.addListener("dragstart", () => {
+          if (programmaticMoveRef.current) return;
+          if (Date.now() < suppressManualUntilRef.current) return;
+          if (!destination) return;
+
+          followUserRef.current = false;
+          setShowRecenter(true);
+        });
+
+        map.addListener("zoom_changed", () => {
+          if (programmaticMoveRef.current) return;
+          if (Date.now() < suppressManualUntilRef.current) return;
+          if (!destination) return;
+
+          followUserRef.current = false;
+          setShowRecenter(true);
+        });
+
         animatedCenterRef.current = center;
         lastLocationForHeadingRef.current = center;
         lastConfirmedOnRouteRef.current = center;
@@ -381,7 +430,7 @@ export default function MapView({
     return () => {
       cancelled = true;
     };
-  }, [location]);
+  }, [location, destination]);
 
   useEffect(() => {
     if (!location || !mapObj.current || !window.google) return;
@@ -434,6 +483,8 @@ export default function MapView({
 
     if (!destination) {
       navigationReadyRef.current = false;
+      followUserRef.current = true;
+      setShowRecenter(false);
       animatedCenterRef.current = current;
       map.setCenter(current);
 
@@ -463,66 +514,82 @@ export default function MapView({
     const targetZoom = getNavigationZoom(location.speed);
     const currentZoom = map.getZoom() ?? targetZoom;
 
-    if (Math.abs(currentZoom - targetZoom) >= 1) {
-      map.setZoom(targetZoom);
-    }
-
-    if (typeof map.setTilt === "function") {
-      try {
-        map.setTilt(45);
-      } catch {
-        // ignore
+    if (followUserRef.current) {
+      if (Math.abs(currentZoom - targetZoom) >= 1) {
+        suppressManualUntilRef.current = Date.now() + 800;
+        programmaticMoveRef.current = true;
+        map.setZoom(targetZoom);
+        window.setTimeout(() => {
+          programmaticMoveRef.current = false;
+        }, 200);
       }
-    }
 
-    if (typeof map.setHeading === "function") {
-      try {
-        map.setHeading(headingRef.current);
-      } catch {
-        // ignore
+      if (typeof map.setTilt === "function") {
+        try {
+          map.setTilt(45);
+        } catch {
+          // ignore
+        }
       }
-    }
 
-    const bounds = map.getBounds();
-    let projectedTarget = current;
+      if (typeof map.setHeading === "function") {
+        try {
+          map.setHeading(headingRef.current);
+        } catch {
+          // ignore
+        }
+      }
 
-    if (bounds) {
-      const ne = bounds.getNorthEast();
-      const sw = bounds.getSouthWest();
+      const bounds = map.getBounds();
+      let projectedTarget = current;
 
-      const latSpan = Math.abs(ne.lat() - sw.lat());
-      const lngSpan = Math.abs(ne.lng() - sw.lng());
+      if (bounds) {
+        const ne = bounds.getNorthEast();
+        const sw = bounds.getSouthWest();
 
-      const headingRad = (headingRef.current * Math.PI) / 180;
+        const latSpan = Math.abs(ne.lat() - sw.lat());
+        const lngSpan = Math.abs(ne.lng() - sw.lng());
 
-      const backwardOffsetLat = Math.cos(headingRad) * latSpan * 0.12;
-      const backwardOffsetLng = Math.sin(headingRad) * lngSpan * 0.12;
+        const headingRad = (headingRef.current * Math.PI) / 180;
 
-      projectedTarget = {
-        lat: current.lat - backwardOffsetLat,
-        lng: current.lng - backwardOffsetLng,
+        const backwardOffsetLat = Math.cos(headingRad) * latSpan * 0.12;
+        const backwardOffsetLng = Math.sin(headingRad) * lngSpan * 0.12;
+
+        projectedTarget = {
+          lat: current.lat - backwardOffsetLat,
+          lng: current.lng - backwardOffsetLng,
+        };
+      }
+
+      const previousCenter = animatedCenterRef.current || projectedTarget;
+      const nextCenter = {
+        lat: lerp(previousCenter.lat, projectedTarget.lat, 0.22),
+        lng: lerp(previousCenter.lng, projectedTarget.lng, 0.22),
       };
-    }
 
-    const previousCenter = animatedCenterRef.current || projectedTarget;
-    const nextCenter = {
-      lat: lerp(previousCenter.lat, projectedTarget.lat, 0.22),
-      lng: lerp(previousCenter.lng, projectedTarget.lng, 0.22),
-    };
+      const movedCenter = calculateDistanceMeters(
+        previousCenter.lat,
+        previousCenter.lng,
+        nextCenter.lat,
+        nextCenter.lng
+      );
 
-    const movedCenter = calculateDistanceMeters(
-      previousCenter.lat,
-      previousCenter.lng,
-      nextCenter.lat,
-      nextCenter.lng
-    );
-
-    if (movedCenter >= 2 || now - lastAnimatedAtRef.current > 1100) {
-      map.panTo(nextCenter);
-      animatedCenterRef.current = nextCenter;
-      lastAnimatedAtRef.current = now;
+      if (movedCenter >= 2 || now - lastAnimatedAtRef.current > 1100) {
+        setProgrammaticCenter(nextCenter);
+      }
     }
   }, [location, destination]);
+
+  useEffect(() => {
+    if (!recenterSignal || !location) return;
+
+    const current = {
+      lat: location.latitude,
+      lng: location.longitude,
+    };
+
+    focusNavigationCamera(current, headingRef.current, location.speed);
+  }, [recenterSignal, location]);
 
   useEffect(() => {
     if (
@@ -709,59 +776,24 @@ export default function MapView({
     );
   }, [mapReady, location, destination, onStepsUpdate]);
 
-  useEffect(() => {
-    if (!destination) {
-      navigationReadyRef.current = false;
-      lastRouteAtRef.current = 0;
-      offRouteStartedAtRef.current = null;
-      offRouteSampleCountRef.current = 0;
-      lastRouteDestinationRef.current = null;
-      routePathRef.current = [];
-      animatedCenterRef.current = null;
-      lastLocationForHeadingRef.current = location
-        ? { lat: location.latitude, lng: location.longitude }
-        : null;
-      lastConfirmedOnRouteRef.current = location
-        ? { lat: location.latitude, lng: location.longitude }
-        : null;
-      headingRef.current = 0;
-      markerHeadingRef.current = 0;
-
-      if (directionsRenderer.current) {
-        directionsRenderer.current.set("directions", null);
-      }
-
-      if (destinationMarkerRef.current) {
-        destinationMarkerRef.current.setMap(null);
-        destinationMarkerRef.current = null;
-      }
-
-      if (originMarkerRef.current && window.google?.maps) {
-        originMarkerRef.current.setIcon(getCarSymbol(window.google, 0));
-      }
-
-      if (mapObj.current) {
-        if (typeof mapObj.current.setHeading === "function") {
-          try {
-            mapObj.current.setHeading(0);
-          } catch {
-            // ignore
-          }
-        }
-
-        if (typeof mapObj.current.setTilt === "function") {
-          try {
-            mapObj.current.setTilt(0);
-          } catch {
-            // ignore
-          }
-        }
-      }
-    }
-  }, [destination, location]);
-
   return (
-    <div style={{ width: "100%", height: "100%", position: "relative" }}>
+    <div
+      style={{
+        width: "100%",
+        height: "100%",
+        position: "relative",
+        background: "#f3f4f6",
+      }}
+    >
+      <div
+        ref={mapRef}
+        style={{
+          width: "100%",
+          height: "100%",
+          background: "#e5e7eb",
+        }}
+      />
+
       {loadingMap && (
         <div
           style={{
@@ -771,10 +803,11 @@ export default function MapView({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            background: "#111827",
-            color: "#fff",
+            background: "rgba(255,255,255,0.82)",
+            color: "#111827",
             fontSize: 16,
             fontWeight: 700,
+            backdropFilter: "blur(3px)",
           }}
         >
           Carregando mapa...
@@ -787,8 +820,8 @@ export default function MapView({
             position: "absolute",
             left: 16,
             right: 16,
-            bottom: 16,
-            zIndex: 3,
+            top: 16,
+            zIndex: 4,
             background: "rgba(127,29,29,0.95)",
             color: "#fff",
             padding: 14,
@@ -812,8 +845,8 @@ export default function MapView({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            background: "#111827",
-            color: "#fff",
+            background: "rgba(255,255,255,0.92)",
+            color: "#111827",
             padding: 24,
             textAlign: "center",
             fontWeight: 700,
@@ -823,13 +856,35 @@ export default function MapView({
         </div>
       )}
 
-      <div
-        ref={mapRef}
-        style={{
-          width: "100%",
-          height: "100%",
-        }}
-      />
+      {showRecenter && destination && (
+        <button
+          onClick={() => {
+            if (!location) return;
+            focusNavigationCamera(
+              { lat: location.latitude, lng: location.longitude },
+              headingRef.current,
+              location.speed
+            );
+          }}
+          style={{
+            position: "absolute",
+            right: 16,
+            bottom: 16,
+            zIndex: 5,
+            background: "rgba(17,24,39,0.94)",
+            color: "#fff",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 12,
+            padding: "12px 14px",
+            cursor: "pointer",
+            fontWeight: 700,
+            boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+            backdropFilter: "blur(8px)",
+          }}
+        >
+          Recentralizar
+        </button>
+      )}
     </div>
   );
 }
