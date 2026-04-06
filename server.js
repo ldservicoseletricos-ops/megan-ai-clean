@@ -15,6 +15,24 @@ dotenv.config();
 const destinationCache = new Map();
 
 /* =========================
+   FAVORITOS E HISTÓRICO
+========================= */
+const favoriteDestinations = [
+  {
+    id: "home",
+    label: "Casa",
+    address: "Praça da Moça, Centro, Diadema - SP",
+  },
+  {
+    id: "work",
+    label: "Trabalho",
+    address: "Rua Presidente Wenceslau, Eldorado, Diadema - SP, Brasil",
+  },
+];
+
+const recentDestinations = [];
+
+/* =========================
    APP INIT
 ========================= */
 const app = express();
@@ -371,6 +389,24 @@ function buildAddressCandidates(cleaned) {
   return Array.from(candidates);
 }
 
+function addRecentDestination(destination) {
+  if (!destination?.name) return;
+
+  const normalized = normalizeText(destination.name);
+  const filtered = recentDestinations.filter(
+    (item) => normalizeText(item.name) !== normalized
+  );
+
+  filtered.unshift({
+    name: destination.name,
+    latitude: destination.latitude,
+    longitude: destination.longitude,
+  });
+
+  recentDestinations.length = 0;
+  recentDestinations.push(...filtered.slice(0, 6));
+}
+
 async function geocodeDestination(query) {
   const cleaned = cleanDestinationText(query);
   const normalized = normalizeText(cleaned);
@@ -385,6 +421,20 @@ async function geocodeDestination(query) {
   if (known) {
     destinationCache.set(normalized, known);
     return known;
+  }
+
+  const favorite = favoriteDestinations.find(
+    (item) =>
+      normalizeText(item.label) === normalized ||
+      normalizeText(item.address) === normalized
+  );
+
+  if (favorite) {
+    const result = await googleGeocode(favorite.address);
+    if (result) {
+      destinationCache.set(normalized, result);
+      return result;
+    }
   }
 
   const candidates = buildAddressCandidates(cleaned);
@@ -417,7 +467,7 @@ async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionTok
   }
 
   const cleanedInput = String(input || "").trim();
-  if (cleanedInput.length < 3) return [];
+  if (cleanedInput.length < 2) return [];
 
   const body = {
     input: cleanedInput,
@@ -478,10 +528,40 @@ async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionTok
           .filter(Boolean)
       : [];
 
+    const recent = recentDestinations
+      .filter((item) =>
+        normalizeText(item.name).includes(normalizeText(cleanedInput))
+      )
+      .map((item) => ({
+        text: item.name,
+        placeId: "",
+        type: "recent",
+      }));
+
+    const favorites = favoriteDestinations
+      .filter((item) => {
+        const normalizedInput = normalizeText(cleanedInput);
+        return (
+          normalizeText(item.label).includes(normalizedInput) ||
+          normalizeText(item.address).includes(normalizedInput)
+        );
+      })
+      .map((item) => ({
+        text: `${item.label} — ${item.address}`,
+        placeId: "",
+        type: "favorite",
+      }));
+
+    const merged = [
+      ...favorites,
+      ...recent,
+      ...suggestions.map((item) => ({ ...item, type: "google" })),
+    ];
+
     const unique = [];
     const seen = new Set();
 
-    for (const item of suggestions) {
+    for (const item of merged) {
       const key = normalizeText(item.text);
       if (!seen.has(key)) {
         seen.add(key);
@@ -489,7 +569,7 @@ async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionTok
       }
     }
 
-    return unique.slice(0, 5);
+    return unique.slice(0, 8);
   } catch (error) {
     console.error("❌ Erro autocomplete Google Places:", error);
     return [];
@@ -515,6 +595,17 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
 ========================= */
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+/* =========================
+   FAVORITOS / RECENTES
+========================= */
+app.get("/api/navigation/quick-access", (_req, res) => {
+  return res.json({
+    ok: true,
+    favorites: favoriteDestinations,
+    recent: recentDestinations,
+  });
 });
 
 /* =========================
@@ -566,6 +657,8 @@ app.post("/api/chat", async (req, res) => {
       const destination = await geocodeDestination(nav.destinationText);
 
       if (destination) {
+        addRecentDestination(destination);
+
         return res.json({
           ok: true,
           reply: `🚗 Iniciando navegação para ${destination.name}`,
