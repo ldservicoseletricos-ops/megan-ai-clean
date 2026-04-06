@@ -21,7 +21,7 @@ type Step = {
 type NavigationSuggestion = {
   text: string;
   placeId?: string;
-  type?: "favorite" | "recent" | "google";
+  type?: "favorite" | "recent" | "known" | "google";
 };
 
 type QuickAccessItem = {
@@ -75,40 +75,7 @@ function looksLikeNavigationInput(value: string) {
 
   if (text.includes("?")) return false;
 
-  const explicitNavigation =
-    text.startsWith("navegar") ||
-    text.startsWith("ir para") ||
-    text.startsWith("ir pra") ||
-    text.startsWith("rota") ||
-    text.startsWith("abrir mapa para") ||
-    text.startsWith("abrir rota para") ||
-    text.startsWith("me leve para") ||
-    text.startsWith("me leva para") ||
-    text.startsWith("me leve pra") ||
-    text.startsWith("me leva pra");
-
-  const addressLike =
-    text.includes("rua ") ||
-    text.includes("avenida ") ||
-    text.includes("av ") ||
-    text.includes("estrada ") ||
-    text.includes("rodovia ") ||
-    text.includes("travessa ") ||
-    text.includes("alameda ") ||
-    text.includes("praca ") ||
-    text.includes("praça ") ||
-    text.includes("shopping ") ||
-    text.includes("mercado ") ||
-    text.includes("centro ") ||
-    text.includes("bairro ") ||
-    text.includes("parque ");
-
-  const placeNameLike =
-    text.split(" ").length <= 8 &&
-    /^[a-z0-9\s\-.,à-ú]+$/i.test(value) &&
-    text.length >= 2;
-
-  return explicitNavigation || addressLike || placeNameLike;
+  return true;
 }
 
 function generateSessionToken() {
@@ -130,7 +97,7 @@ export default function App() {
 
   const [suggestions, setSuggestions] = useState<NavigationSuggestion[]>([]);
   const [isSuggesting, setIsSuggesting] = useState(false);
-  const [suggestionsEnabled, setSuggestionsEnabled] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
   const [suggestionError, setSuggestionError] = useState("");
 
   const [favorites, setFavorites] = useState<QuickAccessItem[]>([]);
@@ -139,10 +106,11 @@ export default function App() {
   const debounceRef = useRef<number | null>(null);
   const sessionTokenRef = useRef(generateSessionToken());
   const locationRef = useRef<DeviceLocation>(null);
-  const lastSuggestionQueryRef = useRef("");
 
   useEffect(() => {
-    checkHealth().then(() => setStatus("Online"));
+    checkHealth()
+      .then(() => setStatus("Online"))
+      .catch(() => setStatus("Offline"));
   }, []);
 
   useEffect(() => {
@@ -171,14 +139,11 @@ export default function App() {
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        const loc = {
+        setDeviceLocation({
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
           accuracy: pos.coords.accuracy ?? null,
-        };
-
-        console.log("LOCALIZAÇÃO INICIAL:", loc);
-        setDeviceLocation(loc);
+        });
       },
       (error) => {
         console.log("Erro localização inicial:", error);
@@ -212,7 +177,6 @@ export default function App() {
             return prev;
           }
 
-          console.log("LOCALIZAÇÃO ATUALIZADA:", nextLoc);
           return nextLoc;
         });
       },
@@ -240,18 +204,17 @@ export default function App() {
     if (!canSuggest) {
       setSuggestions([]);
       setIsSuggesting(false);
-      setSuggestionsEnabled(false);
       setSuggestionError("");
-      lastSuggestionQueryRef.current = "";
+      setShowSuggestions(false);
       return;
     }
 
-    setSuggestionsEnabled(true);
-    setSuggestionError("");
+    setShowSuggestions(true);
 
     debounceRef.current = window.setTimeout(async () => {
       try {
         setIsSuggesting(true);
+        setSuggestionError("");
 
         const res = await suggestNavigation(
           trimmed,
@@ -263,8 +226,9 @@ export default function App() {
           ? res.suggestions
           : [];
 
+        console.log("Sugestões recebidas:", nextSuggestions);
+
         setSuggestions(nextSuggestions);
-        lastSuggestionQueryRef.current = trimmed;
 
         if (nextSuggestions.length === 0) {
           setSuggestionError("Nenhuma sugestão encontrada para esse destino.");
@@ -278,7 +242,7 @@ export default function App() {
       } finally {
         setIsSuggesting(false);
       }
-    }, 300);
+    }, 350);
 
     return () => {
       if (debounceRef.current) {
@@ -286,11 +250,6 @@ export default function App() {
       }
     };
   }, [input]);
-
-  const iniciarNavegacao = (dest: any) => {
-    if (!dest?.name) return;
-    console.log("Navegação interna iniciada:", dest);
-  };
 
   async function refreshQuickAccess() {
     try {
@@ -306,14 +265,12 @@ export default function App() {
     const trimmed = String(messageOverride ?? input).trim();
     if (!trimmed) return;
 
-    console.log("ENVIANDO COM LOCALIZAÇÃO:", deviceLocation);
+    setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
 
     setSuggestions([]);
-    setIsSuggesting(false);
-    setSuggestionsEnabled(false);
     setSuggestionError("");
-
-    setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
+    setShowSuggestions(false);
+    setIsSuggesting(false);
 
     try {
       const res = await sendChatMessage(trimmed, deviceLocation);
@@ -328,15 +285,9 @@ export default function App() {
 
       if (res?.meta?.navigation?.active && res?.meta?.navigation?.destination) {
         const nextDestination = res.meta.navigation.destination;
-
         setDestination(nextDestination);
         setSteps([]);
         setShowMap(true);
-
-        setTimeout(() => {
-          iniciarNavegacao(nextDestination);
-        }, 800);
-
         await refreshQuickAccess();
       }
 
@@ -360,7 +311,7 @@ export default function App() {
     setInput(suggestion.text);
     setSuggestions([]);
     setSuggestionError("");
-    setSuggestionsEnabled(false);
+    setShowSuggestions(false);
     handleSend(suggestion.text);
   }
 
@@ -375,6 +326,7 @@ export default function App() {
   function renderSuggestionBadge(type?: string) {
     if (type === "favorite") return "⭐";
     if (type === "recent") return "🕘";
+    if (type === "known") return "📌";
     return "📍";
   }
 
@@ -382,7 +334,7 @@ export default function App() {
     <div style={{ display: "flex", height: "100vh", background: "#343541" }}>
       <aside
         style={{
-          width: 260,
+          width: 280,
           background: "#202123",
           padding: 20,
           color: "#fff",
@@ -393,7 +345,7 @@ export default function App() {
         }}
       >
         <div>
-          <h2>Megan OS</h2>
+          <h2 style={{ marginTop: 0 }}>Megan OS</h2>
           <p style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</p>
 
           <div style={{ marginTop: 20 }}>
@@ -462,6 +414,7 @@ export default function App() {
             borderRadius: 8,
             color: "#fff",
             cursor: "pointer",
+            fontWeight: 700,
           }}
         >
           🗺️ {showMap ? "Fechar mapa" : "Abrir mapa"}
@@ -510,7 +463,7 @@ export default function App() {
             position: "relative",
           }}
         >
-          {suggestionsEnabled && (suggestions.length > 0 || isSuggesting || suggestionError) && (
+          {showSuggestions && (isSuggesting || suggestionError || suggestions.length > 0) && (
             <div
               style={{
                 position: "absolute",
@@ -525,7 +478,7 @@ export default function App() {
                 zIndex: 20,
               }}
             >
-              {isSuggesting && suggestions.length === 0 && (
+              {isSuggesting && (
                 <div
                   style={{
                     padding: 14,
@@ -537,7 +490,35 @@ export default function App() {
                 </div>
               )}
 
-              {!isSuggesting && suggestionError && suggestions.length === 0 && (
+              {!isSuggesting && suggestions.length > 0 && (
+                <>
+                  {suggestions.map((item, index) => (
+                    <button
+                      key={`${item.text}-${index}`}
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => handleSuggestionSelect(item)}
+                      style={{
+                        width: "100%",
+                        textAlign: "left",
+                        padding: "14px 16px",
+                        border: "none",
+                        borderBottom:
+                          index !== suggestions.length - 1
+                            ? "1px solid rgba(255,255,255,0.08)"
+                            : "none",
+                        background: "transparent",
+                        color: "#fff",
+                        cursor: "pointer",
+                        fontSize: 14,
+                      }}
+                    >
+                      {renderSuggestionBadge(item.type)} {item.text}
+                    </button>
+                  ))}
+                </>
+              )}
+
+              {!isSuggesting && suggestions.length === 0 && suggestionError && (
                 <div
                   style={{
                     padding: 14,
@@ -548,29 +529,6 @@ export default function App() {
                   {suggestionError}
                 </div>
               )}
-
-              {suggestions.map((item, index) => (
-                <button
-                  key={`${item.text}-${index}`}
-                  onClick={() => handleSuggestionSelect(item)}
-                  style={{
-                    width: "100%",
-                    textAlign: "left",
-                    padding: "14px 16px",
-                    border: "none",
-                    borderBottom:
-                      index !== suggestions.length - 1
-                        ? "1px solid rgba(255,255,255,0.08)"
-                        : "none",
-                    background: "transparent",
-                    color: "#fff",
-                    cursor: "pointer",
-                    fontSize: 14,
-                  }}
-                >
-                  {renderSuggestionBadge(item.type)} {item.text}
-                </button>
-              ))}
             </div>
           )}
 
@@ -579,15 +537,14 @@ export default function App() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onFocus={() => {
-                const trimmed = input.trim();
-                if (looksLikeNavigationInput(trimmed)) {
-                  setSuggestionsEnabled(true);
+                if (looksLikeNavigationInput(input.trim())) {
+                  setShowSuggestions(true);
                 }
               }}
               onBlur={() => {
                 window.setTimeout(() => {
-                  setSuggestionsEnabled(false);
-                }, 180);
+                  setShowSuggestions(false);
+                }, 200);
               }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleSend();
@@ -610,6 +567,7 @@ export default function App() {
                 borderRadius: 8,
                 color: "#fff",
                 cursor: "pointer",
+                fontWeight: 700,
               }}
             >
               Enviar
@@ -652,62 +610,6 @@ export default function App() {
             >
               Fechar mapa
             </button>
-          </div>
-
-          <div
-            style={{
-              position: "absolute",
-              top: 20,
-              left: 20,
-              zIndex: 1001,
-              display: "flex",
-              gap: 14,
-              background: "rgba(17,24,39,0.72)",
-              backdropFilter: "blur(10px)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              borderRadius: 18,
-              padding: 16,
-              color: "#fff",
-            }}
-          >
-            <div
-              style={{
-                minWidth: 118,
-                background: "rgba(255,255,255,0.04)",
-                padding: 12,
-                borderRadius: 14,
-              }}
-            >
-              <div style={{ fontSize: 14, opacity: 0.75 }}>Velocidade</div>
-              <div style={{ fontSize: 24, fontWeight: 800 }}>0</div>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>km/h</div>
-            </div>
-
-            <div
-              style={{
-                minWidth: 118,
-                background: "rgba(255,255,255,0.04)",
-                padding: 12,
-                borderRadius: 14,
-              }}
-            >
-              <div style={{ fontSize: 14, opacity: 0.75 }}>Distância</div>
-              <div style={{ fontSize: 24, fontWeight: 800 }}>
-                {destination ? "--" : "--"}
-              </div>
-            </div>
-
-            <div
-              style={{
-                minWidth: 118,
-                background: "rgba(255,255,255,0.04)",
-                padding: 12,
-                borderRadius: 14,
-              }}
-            >
-              <div style={{ fontSize: 14, opacity: 0.75 }}>Chegada</div>
-              <div style={{ fontSize: 24, fontWeight: 800 }}>--</div>
-            </div>
           </div>
 
           <MapView

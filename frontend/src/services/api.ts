@@ -1,89 +1,69 @@
-import axios from "axios";
-
-const API_URL = import.meta.env.VITE_API_URL;
-
-if (!API_URL) {
-  throw new Error("VITE_API_URL não configurado");
-}
-
-export const api = axios.create({
-  baseURL: API_URL,
-  headers: {
-    "Content-Type": "application/json",
-  },
-});
+const API_URL =
+  import.meta.env.VITE_API_URL?.replace(/\/+$/, "") || "http://localhost:10000";
 
 export async function checkHealth() {
-  const { data } = await api.get("/api/health");
-  return data;
+  const res = await fetch(`${API_URL}/api/health`);
+  if (!res.ok) {
+    throw new Error("Falha ao verificar backend");
+  }
+  return res.json();
 }
 
-export async function sendChatMessage(
-  message: string,
-  deviceLocation: {
-    latitude: number;
-    longitude: number;
-    accuracy?: number | null;
-  } | null
-) {
-  const payload = {
-    message,
-    deviceLocation: deviceLocation
-      ? {
-          latitude: Number(deviceLocation.latitude),
-          longitude: Number(deviceLocation.longitude),
-          accuracy:
-            typeof deviceLocation.accuracy === "number"
-              ? deviceLocation.accuracy
-              : null,
-        }
-      : null,
-  };
-
-  console.log("sendChatMessage payload:", payload);
-
-  const { data } = await api.post("/api/chat", payload);
-
-  return data;
-}
-
-export async function resolveNavigationDestination(message: string) {
-  const { data } = await api.post("/api/navigation/resolve", {
-    message,
+export async function sendChatMessage(message: string, deviceLocation?: any) {
+  const res = await fetch(`${API_URL}/api/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message,
+      deviceLocation: deviceLocation || null,
+    }),
   });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(data?.error || "Erro ao enviar mensagem");
+  }
 
   return data;
 }
 
 export async function suggestNavigation(
   input: string,
-  deviceLocation: {
-    latitude: number;
-    longitude: number;
-    accuracy?: number | null;
-  } | null,
-  sessionToken: string
+  deviceLocation?: any,
+  sessionToken?: string
 ) {
-  const payload = {
-    input,
-    sessionToken,
-    deviceLocation: deviceLocation
-      ? {
-          latitude: Number(deviceLocation.latitude),
-          longitude: Number(deviceLocation.longitude),
-          accuracy:
-            typeof deviceLocation.accuracy === "number"
-              ? deviceLocation.accuracy
-              : null,
-        }
-      : null,
-  };
+  const res = await fetch(`${API_URL}/api/navigation/suggest`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      input,
+      deviceLocation: deviceLocation || null,
+      sessionToken: sessionToken || null,
+    }),
+  });
 
-  const { data } = await api.post("/api/navigation/suggest", payload);
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(data?.error || "Erro ao buscar sugestões");
+  }
+
   return data;
 }
 
 export async function getNavigationQuickAccess() {
-  const { data } = await api.get("/api/navigation/quick-access");
+  const res = await fetch(`${API_URL}/api/navigation/quick-access`);
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(data?.error || "Erro ao buscar atalhos");
+  }
+
   return data;
 }
