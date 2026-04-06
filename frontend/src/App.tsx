@@ -74,6 +74,25 @@ export default function App() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
+  // ✅ ADIÇÃO (NOVA FUNÇÃO — NÃO QUEBRA NADA)
+  const iniciarNavegacao = (dest: any) => {
+    if (!dest?.name) return;
+
+    const isMobile = /Android|iPhone/i.test(navigator.userAgent);
+
+    if (isMobile) {
+      window.location.href = `google.navigation:q=${encodeURIComponent(dest.name)}`;
+    } else {
+      const origin = deviceLocation
+        ? `${deviceLocation.latitude},${deviceLocation.longitude}`
+        : "";
+
+      const url = `https://www.google.com/maps/dir/?api=1&origin=${origin}&destination=${encodeURIComponent(dest.name)}&travelmode=driving`;
+
+      window.open(url, "_blank");
+    }
+  };
+
   async function handleSend() {
     const trimmed = input.trim();
     if (!trimmed) return;
@@ -96,10 +115,17 @@ export default function App() {
         },
       ]);
 
+      // 🔥 ALTERAÇÃO MÍNIMA (SÓ ISSO)
       if (res?.meta?.navigation?.active && res?.meta?.navigation?.destination) {
         setDestination(res.meta.navigation.destination);
         setShowMap(true);
+
+        // 🚀 AUTO INICIAR NAVEGAÇÃO
+        setTimeout(() => {
+          iniciarNavegacao(res.meta.navigation.destination);
+        }, 800);
       }
+
     } catch (error) {
       console.log("Erro ao enviar mensagem:", error);
 

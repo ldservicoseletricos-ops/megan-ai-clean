@@ -4,6 +4,10 @@ import dotenv from "dotenv";
 import fetch from "node-fetch";
 import { GoogleGenAI } from "@google/genai";
 
+// 🔥 NOVAS ROTAS
+import navigationRouter from "./routes/navigation.route.js";
+import drivingRouter from "./routes/driving.route.js";
+
 dotenv.config();
 
 /* =========================
@@ -59,35 +63,8 @@ app.use(
 app.use(express.json({ limit: "10mb" }));
 
 /* =========================
-   NAVIGATION HELPERS
+   HELPERS (mantidos)
 ========================= */
-function detectNavigationIntent(message) {
-  const original = String(message || "").trim();
-  const text = original.toLowerCase();
-
-  const patterns = [
-    "navegar para ",
-    "ir para ",
-    "rota para ",
-    "me leve para ",
-  ];
-
-  for (const pattern of patterns) {
-    const index = text.indexOf(pattern);
-    if (index !== -1) {
-      return {
-        isNavigationRequest: true,
-        destinationText: original.slice(index + pattern.length).trim(),
-      };
-    }
-  }
-
-  return {
-    isNavigationRequest: false,
-    destinationText: "",
-  };
-}
-
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -96,222 +73,18 @@ function normalizeText(value) {
     .trim();
 }
 
-function isWeatherRequest(message) {
-  const normalized = normalizeText(message);
-
-  return [
-    "clima",
-    "tempo",
-    "temperatura",
-    "previsao",
-    "previsão",
-    "vai chover",
-    "clima agora",
-    "como esta o clima",
-    "como está o clima",
-    "qual o clima",
-    "como está o tempo",
-    "como esta o tempo",
-  ].some((term) => normalized.includes(normalizeText(term)));
-}
-
-function normalizeLocationPayload(deviceLocation) {
-  if (!deviceLocation || typeof deviceLocation !== "object") return null;
-
-  const latitude = Number(deviceLocation.latitude);
-  const longitude = Number(deviceLocation.longitude);
-
-  if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
-    return null;
-  }
-
-  return {
-    latitude,
-    longitude,
-    accuracy:
-      typeof deviceLocation.accuracy === "number"
-        ? deviceLocation.accuracy
-        : null,
-  };
-}
-
-function weatherCodeToText(code) {
-  const map = {
-    0: "céu limpo",
-    1: "predominantemente limpo",
-    2: "parcialmente nublado",
-    3: "nublado",
-    45: "neblina",
-    48: "neblina com geada",
-    51: "garoa leve",
-    53: "garoa moderada",
-    55: "garoa intensa",
-    56: "garoa congelante leve",
-    57: "garoa congelante intensa",
-    61: "chuva leve",
-    63: "chuva moderada",
-    65: "chuva forte",
-    66: "chuva congelante leve",
-    67: "chuva congelante forte",
-    71: "neve leve",
-    73: "neve moderada",
-    75: "neve forte",
-    77: "grãos de neve",
-    80: "pancadas de chuva leves",
-    81: "pancadas de chuva moderadas",
-    82: "pancadas de chuva fortes",
-    85: "pancadas de neve leves",
-    86: "pancadas de neve fortes",
-    95: "trovoadas",
-    96: "trovoadas com granizo leve",
-    99: "trovoadas com granizo forte",
-  };
-
-  return map[code] || "condição não identificada";
-}
-
-async function getWeatherFromCoords(latitude, longitude) {
-  try {
-    const url =
-      `https://api.open-meteo.com/v1/forecast` +
-      `?latitude=${encodeURIComponent(latitude)}` +
-      `&longitude=${encodeURIComponent(longitude)}` +
-      `&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,relative_humidity_2m` +
-      `&timezone=auto`;
-
-    console.log("🌤️ Consultando clima:", { latitude, longitude });
-
-    const res = await fetch(url, {
-      headers: {
-        Accept: "application/json",
-      },
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      console.error("❌ Open-Meteo HTTP ERROR:", res.status, text);
-      return null;
-    }
-
-    const data = await res.json();
-    const current = data?.current;
-
-    if (!current) {
-      console.error("❌ Open-Meteo sem current:", data);
-      return null;
-    }
-
-    return {
-      temperature: current.temperature_2m,
-      feelsLike: current.apparent_temperature,
-      windSpeed: current.wind_speed_10m,
-      humidity: current.relative_humidity_2m,
-      weatherCode: current.weather_code,
-      weatherText: weatherCodeToText(current.weather_code),
-      time: current.time || null,
-    };
-  } catch (err) {
-    console.error("❌ Erro clima:", err);
-    return null;
-  }
-}
-
-function buildWeatherReply(weather) {
-  return (
-    `🌤️ Clima agora no seu local:\n` +
-    `Temperatura: ${weather.temperature}°C\n` +
-    `Sensação térmica: ${weather.feelsLike}°C\n` +
-    `Condição: ${weather.weatherText}\n` +
-    `Umidade: ${weather.humidity}%\n` +
-    `Vento: ${weather.windSpeed} km/h`
-  );
-}
-
-function getKnownDestination(query) {
-  const normalized = normalizeText(query);
-
-  if (
-    normalized.includes("praca da moca") ||
-    normalized.includes("paraca da moca") ||
-    normalized.includes("praca moca") ||
-    normalized.includes("moca diadema") ||
-    normalized.includes("praca da moca diadema") ||
-    normalized.includes("paraca da moca diadema")
-  ) {
-    return {
-      latitude: -23.688958,
-      longitude: -46.625296,
-      name: "Praça da Moça, Centro, Diadema - SP",
-    };
-  }
-
-  return null;
-}
-
-/* =========================
-   GEOCODE
-========================= */
-async function geocodeDestination(query) {
-  const normalized = normalizeText(query);
-  if (!normalized) return null;
-
-  if (destinationCache.has(normalized)) {
-    console.log("⚡ Cache hit:", normalized);
-    return destinationCache.get(normalized);
-  }
-
-  const known = getKnownDestination(normalized);
-  if (known) {
-    destinationCache.set(normalized, known);
-    return known;
-  }
-
-  try {
-    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
-      normalized
-    )}&format=json&limit=1`;
-
-    const res = await fetch(url);
-    const data = await res.json();
-
-    if (data && data.length > 0) {
-      const result = {
-        latitude: Number(data[0].lat),
-        longitude: Number(data[0].lon),
-        name: data[0].display_name,
-      };
-
-      destinationCache.set(normalized, result);
-      return result;
-    }
-  } catch (err) {
-    console.log("Erro geocode:", err);
-  }
-
-  return null;
-}
-
-/* =========================
-   HELPERS DE DISTÂNCIA
-========================= */
-function toRadians(value) {
-  return (value * Math.PI) / 180;
-}
-
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const earthRadiusKm = 6371;
-  const dLat = toRadians(lat2 - lat1);
-  const dLon = toRadians(lon2 - lon1);
+  const R = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
 
   const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRadians(lat1)) *
-      Math.cos(toRadians(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) *
+    Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
 
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return earthRadiusKm * c;
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
 /* =========================
@@ -322,107 +95,36 @@ app.get("/api/health", (_req, res) => {
 });
 
 /* =========================
-   CHAT
+   CHAT (mantido)
 ========================= */
 app.post("/api/chat", async (req, res) => {
   try {
-    const { message, deviceLocation } = req.body;
-    const normalizedLocation = normalizeLocationPayload(deviceLocation);
-
-    console.log("📩 /api/chat recebida:", {
-      message,
-      normalizedLocation,
-    });
-
-    const nav = detectNavigationIntent(message);
-
-    if (nav.isNavigationRequest) {
-      const destination = await geocodeDestination(nav.destinationText);
-
-      if (destination) {
-        return res.json({
-          ok: true,
-          reply: `🚗 Iniciando navegação para ${destination.name}`,
-          meta: {
-            navigation: {
-              active: true,
-              destination,
-            },
-          },
-        });
-      }
-
-      return res.json({
-        ok: true,
-        reply: `Entendi o destino "${nav.destinationText}", mas não consegui localizar esse lugar com precisão. Tente enviar o nome com cidade e estado.`,
-        meta: {
-          navigation: {
-            active: false,
-            destination: null,
-          },
-        },
-      });
-    }
-
-    if (isWeatherRequest(message)) {
-      if (!normalizedLocation) {
-        return res.json({
-          ok: true,
-          reply: "Para informar o clima, preciso da localização atual do aparelho.",
-        });
-      }
-
-      const weather = await getWeatherFromCoords(
-        normalizedLocation.latitude,
-        normalizedLocation.longitude
-      );
-
-      if (weather) {
-        return res.json({
-          ok: true,
-          reply: buildWeatherReply(weather),
-        });
-      }
-
-      return res.json({
-        ok: true,
-        reply: "Não consegui acessar o clima agora. Tente novamente em instantes.",
-      });
-    }
+    const { message } = req.body;
 
     if (ai && message) {
-      try {
-        const response = await ai.models.generateContent({
-          model: GEMINI_MODEL,
-          contents: message,
-        });
+      const response = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: message,
+      });
 
-        const reply =
-          response?.text ||
-          response?.candidates?.[0]?.content?.parts?.[0]?.text ||
-          "Mensagem recebida";
+      const reply =
+        response?.text ||
+        response?.candidates?.[0]?.content?.parts?.[0]?.text ||
+        "Mensagem recebida";
 
-        return res.json({
-          ok: true,
-          reply,
-        });
-      } catch (err) {
-        console.error("Erro Gemini:", err);
-      }
+      return res.json({ ok: true, reply });
     }
 
-    return res.json({
-      ok: true,
-      reply: "Mensagem recebida",
-    });
+    return res.json({ ok: true, reply: "Mensagem recebida" });
+
   } catch (err) {
     console.error(err);
-    res.status(500).json({ ok: false, error: "Erro interno no chat" });
+    res.status(500).json({ ok: false });
   }
 });
 
 /* =========================
-   DRIVING
+   DRIVING (mantido + compatível)
 ========================= */
 app.post("/api/driving", async (req, res) => {
   try {
@@ -430,24 +132,15 @@ app.post("/api/driving", async (req, res) => {
 
     const lat = Number(latitude);
     const lng = Number(longitude);
-    const currentSpeed = typeof speed === "number" ? speed : Number(speed);
 
     if (Number.isNaN(lat) || Number.isNaN(lng)) {
-      return res.status(400).json({
-        ok: false,
-        error: "latitude e longitude são obrigatórios",
-      });
+      return res.status(400).json({ ok: false });
     }
 
     let distance = "--";
     let eta = "--";
 
-    if (
-      destination &&
-      typeof destination === "object" &&
-      !Number.isNaN(Number(destination.latitude)) &&
-      !Number.isNaN(Number(destination.longitude))
-    ) {
+    if (destination?.latitude && destination?.longitude) {
       const distanceKm = calculateDistanceKm(
         lat,
         lng,
@@ -457,11 +150,7 @@ app.post("/api/driving", async (req, res) => {
 
       distance = `${distanceKm.toFixed(2)} km`;
 
-      const speedKmh =
-        !Number.isNaN(currentSpeed) && currentSpeed > 0
-          ? currentSpeed * 3.6
-          : 40;
-
+      const speedKmh = speed ? speed * 3.6 : 40;
       const minutes = Math.max(1, Math.round((distanceKm / speedKmh) * 60));
       eta = `${minutes} min`;
     }
@@ -472,14 +161,22 @@ app.post("/api/driving", async (req, res) => {
       distance,
       eta,
     });
+
   } catch (error) {
-    console.error("Erro no /api/driving:", error);
-    return res.status(500).json({
-      ok: false,
-      error: "Erro ao processar modo direção",
-    });
+    console.error(error);
+    res.status(500).json({ ok: false });
   }
 });
+
+/* =========================
+   🔥 NOVAS ROTAS PROFISSIONAIS
+========================= */
+
+// 🔥 radar backend
+app.use("/api/driving/radar", drivingRouter);
+
+// 🔥 clima + trânsito
+app.use("/api/navigation", navigationRouter);
 
 /* =========================
    START

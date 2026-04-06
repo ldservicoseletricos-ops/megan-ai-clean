@@ -273,3 +273,14 @@ export async function getWeatherSnapshot(locationInput = {}) {
 export async function getTransitInfo(input = {}) {
   return await getTransitSnapshot(input);
 }
+
+// 🔥 NOVO: SNAPSHOT COMPLETO (CLIMA + TRÂNSITO)
+export async function getNavigationSnapshot(input = {}) {
+  const weather = await getRealWeather(input);
+  const transit = await getTransitSnapshot(input);
+
+  return {
+    weather,
+    transit,
+  };
+}

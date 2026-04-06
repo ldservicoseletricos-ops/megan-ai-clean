@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useDrivingMode } from "../hooks/useDrivingMode";
 import { sendLocationToBackend } from "../services/driving.service";
 import { speak } from "../utils/voice";
@@ -9,17 +9,32 @@ type Destination = {
   name?: string;
 } | null;
 
-type DrivingModeProps = {
-  destination?: Destination;
+type Step = {
+  instruction: string;
+  end_location: { lat: number; lng: number };
 };
 
-export default function DrivingMode({ destination = null }: DrivingModeProps) {
+type DrivingModeProps = {
+  destination?: Destination;
+  steps?: Step[];
+};
+
+export default function DrivingMode({
+  destination = null,
+  steps = [],
+}: DrivingModeProps) {
   const location = useDrivingMode();
 
+  const [speed, setSpeed] = useState(0);
+  const [eta, setEta] = useState("--");
+  const [distance, setDistance] = useState("--");
   const [alert, setAlert] = useState<string | null>(null);
-  const [speed, setSpeed] = useState<number>(0);
-  const [eta, setEta] = useState<string>("--");
-  const [distance, setDistance] = useState<string>("--");
+
+  const stepIndexRef = useRef(0);
+  const warnedStepRef = useRef<number | null>(null);
+  const lastRadarWarningRef = useRef(0);
+  const lastBackendAlertRef = useRef("");
+  const arrivalSpokenRef = useRef(false);
 
   useEffect(() => {
     if (!location) return;
@@ -27,6 +42,17 @@ export default function DrivingMode({ destination = null }: DrivingModeProps) {
     if (location.speed) {
       const kmh = Math.round(location.speed * 3.6);
       setSpeed(kmh);
+
+      const now = Date.now();
+
+      // radar inteligente sem spam
+      if (kmh > 80 && now - lastRadarWarningRef.current > 12000) {
+        speak("Atenção, reduza a velocidade");
+        lastRadarWarningRef.current = now;
+      } else if (kmh > 60 && kmh <= 80 && now - lastRadarWarningRef.current > 18000) {
+        speak("Possível radar à frente");
+        lastRadarWarningRef.current = now;
+      }
     } else {
       setSpeed(0);
     }
@@ -38,27 +64,68 @@ export default function DrivingMode({ destination = null }: DrivingModeProps) {
           destination,
         });
 
+        if (response.eta) setEta(response.eta);
+        if (response.distance) setDistance(response.distance);
+
         if (response.alert) {
           setAlert(response.alert);
-          speak(response.alert);
+
+          if (response.alert !== lastBackendAlertRef.current) {
+            speak(response.alert);
+            lastBackendAlertRef.current = response.alert;
+          }
         } else {
           setAlert(null);
-        }
-
-        if (response.eta) {
-          setEta(response.eta);
-        }
-
-        if (response.distance) {
-          setDistance(response.distance);
+          lastBackendAlertRef.current = "";
         }
       } catch (error) {
-        console.error("Erro no DrivingMode:", error);
+        console.error("Erro DrivingMode:", error);
       }
-    }, 5000);
+    }, 4000);
 
     return () => clearInterval(interval);
   }, [location, destination]);
+
+  useEffect(() => {
+    if (!location || steps.length === 0) return;
+
+    const stepIndex = stepIndexRef.current;
+    const step = steps[stepIndex];
+
+    if (!step) return;
+
+    const dist = Math.hypot(
+      location.latitude - step.end_location.lat,
+      location.longitude - step.end_location.lng
+    );
+
+    // aviso antecipado em ~200m
+    if (dist < 0.002 && warnedStepRef.current !== stepIndex) {
+      speak(`Em breve, ${step.instruction}`);
+      warnedStepRef.current = stepIndex;
+    }
+
+    // instrução no ponto da curva
+    if (dist < 0.0003) {
+      speak(step.instruction);
+      stepIndexRef.current += 1;
+      warnedStepRef.current = null;
+    }
+
+    // chegada
+    if (dist < 0.0001 && !arrivalSpokenRef.current) {
+      speak("Você chegou ao destino");
+      arrivalSpokenRef.current = true;
+    }
+  }, [location, steps]);
+
+  useEffect(() => {
+    if (!destination) {
+      stepIndexRef.current = 0;
+      warnedStepRef.current = null;
+      arrivalSpokenRef.current = false;
+    }
+  }, [destination]);
 
   return (
     <div
