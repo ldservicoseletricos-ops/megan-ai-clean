@@ -24,7 +24,14 @@ type MapViewProps = {
   onStepsUpdate?: (steps: Step[]) => void;
 };
 
+type LatLngLike = {
+  lat: number;
+  lng: number;
+};
+
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+const MIN_ROUTE_REFRESH_DISTANCE_METERS = 35;
+const MIN_ROUTE_REFRESH_INTERVAL_MS = 20000;
 
 function loadGoogleMapsScript(): Promise<typeof google> {
   return new Promise((resolve, reject) => {
@@ -76,6 +83,16 @@ function loadGoogleMapsScript(): Promise<typeof google> {
   });
 }
 
+function arePointsDifferent(a?: LatLngLike | null, b?: LatLngLike | null) {
+  if (!a && !b) return false;
+  if (!a || !b) return true;
+
+  return (
+    Math.abs(a.lat - b.lat) > 0.000001 ||
+    Math.abs(a.lng - b.lng) > 0.000001
+  );
+}
+
 export default function MapView({
   location,
   destination,
@@ -84,12 +101,19 @@ export default function MapView({
   const mapRef = useRef<HTMLDivElement | null>(null);
   const mapObj = useRef<google.maps.Map | null>(null);
   const directionsRenderer = useRef<google.maps.DirectionsRenderer | null>(null);
+  const directionsServiceRef = useRef<google.maps.DirectionsService | null>(null);
   const trafficLayerRef = useRef<google.maps.TrafficLayer | null>(null);
   const originMarkerRef = useRef<google.maps.Marker | null>(null);
   const destinationMarkerRef = useRef<google.maps.Marker | null>(null);
 
-  const lastRouteUpdateRef = useRef(0);
   const initializedRef = useRef(false);
+  const hasCenteredInitialLocationRef = useRef(false);
+  const hasFittedCurrentRouteRef = useRef(false);
+  const isRoutingRef = useRef(false);
+  const followUserRef = useRef(true);
+  const lastRoutedOriginRef = useRef<LatLngLike | null>(null);
+  const lastRoutedDestinationRef = useRef<LatLngLike | null>(null);
+  const lastRouteUpdateRef = useRef(0);
 
   const [mapReady, setMapReady] = useState(false);
   const [loadingMap, setLoadingMap] = useState(true);
@@ -126,7 +150,7 @@ export default function MapView({
         const map = new google.maps.Map(mapRef.current, {
           center,
           zoom: 17,
-          tilt: 45,
+          tilt: 0,
           disableDefaultUI: false,
           mapTypeControl: false,
           streetViewControl: false,
@@ -134,7 +158,16 @@ export default function MapView({
           zoomControl: true,
         });
 
+        map.addListener("dragstart", () => {
+          followUserRef.current = false;
+        });
+
+        map.addListener("zoom_changed", () => {
+          followUserRef.current = false;
+        });
+
         mapObj.current = map;
+        directionsServiceRef.current = new google.maps.DirectionsService();
 
         trafficLayerRef.current = new google.maps.TrafficLayer();
         trafficLayerRef.current.setMap(map);
@@ -156,6 +189,7 @@ export default function MapView({
           title: "Você",
         });
 
+        hasCenteredInitialLocationRef.current = true;
         initializedRef.current = true;
         setMapReady(true);
         setLoadingMap(false);
@@ -188,8 +222,36 @@ export default function MapView({
       originMarkerRef.current.setPosition(current);
     }
 
-    mapObj.current.panTo(current);
-  }, [location]);
+    if (!hasCenteredInitialLocationRef.current) {
+      mapObj.current.setCenter(current);
+      hasCenteredInitialLocationRef.current = true;
+      return;
+    }
+
+    if (followUserRef.current && !destination) {
+      mapObj.current.panTo(current);
+    }
+  }, [location, destination]);
+
+  useEffect(() => {
+    if (!destination) {
+      hasFittedCurrentRouteRef.current = false;
+      lastRoutedDestinationRef.current = null;
+
+      if (destinationMarkerRef.current) {
+        destinationMarkerRef.current.setMap(null);
+        destinationMarkerRef.current = null;
+      }
+
+      if (onStepsUpdate) {
+        onStepsUpdate([]);
+      }
+
+      followUserRef.current = true;
+    } else {
+      followUserRef.current = true;
+    }
+  }, [destination, onStepsUpdate]);
 
   useEffect(() => {
     if (
@@ -198,28 +260,65 @@ export default function MapView({
       !destination ||
       !window.google ||
       !mapObj.current ||
-      !directionsRenderer.current
+      !directionsRenderer.current ||
+      !directionsServiceRef.current ||
+      isRoutingRef.current
     ) {
       return;
     }
 
-    const now = Date.now();
-    if (now - lastRouteUpdateRef.current < 3000) return;
-    lastRouteUpdateRef.current = now;
-
     const google = window.google;
-    const directionsService = new google.maps.DirectionsService();
+    const currentOrigin = {
+      lat: location.latitude,
+      lng: location.longitude,
+    };
+    const currentDestination = {
+      lat: destination.latitude,
+      lng: destination.longitude,
+    };
 
-    directionsService.route(
+    const destinationChanged = arePointsDifferent(
+      lastRoutedDestinationRef.current,
+      currentDestination
+    );
+
+    let movedEnough = false;
+
+    if (
+      lastRoutedOriginRef.current &&
+      google.maps.geometry?.spherical?.computeDistanceBetween
+    ) {
+      const distanceMoved = google.maps.geometry.spherical.computeDistanceBetween(
+        new google.maps.LatLng(
+          lastRoutedOriginRef.current.lat,
+          lastRoutedOriginRef.current.lng
+        ),
+        new google.maps.LatLng(currentOrigin.lat, currentOrigin.lng)
+      );
+
+      movedEnough = distanceMoved >= MIN_ROUTE_REFRESH_DISTANCE_METERS;
+    } else {
+      movedEnough = true;
+    }
+
+    const enoughTimePassed =
+      Date.now() - lastRouteUpdateRef.current >= MIN_ROUTE_REFRESH_INTERVAL_MS;
+
+    const shouldCalculateRoute =
+      destinationChanged ||
+      !lastRoutedOriginRef.current ||
+      (!destinationChanged && movedEnough && enoughTimePassed);
+
+    if (!shouldCalculateRoute) {
+      return;
+    }
+
+    isRoutingRef.current = true;
+
+    directionsServiceRef.current.route(
       {
-        origin: {
-          lat: location.latitude,
-          lng: location.longitude,
-        },
-        destination: {
-          lat: destination.latitude,
-          lng: destination.longitude,
-        },
+        origin: currentOrigin,
+        destination: currentDestination,
         travelMode: google.maps.TravelMode.DRIVING,
         provideRouteAlternatives: true,
         drivingOptions: {
@@ -228,13 +327,22 @@ export default function MapView({
         },
       },
       (result, status) => {
+        isRoutingRef.current = false;
+
         if (status !== "OK" || !result || !result.routes?.length) {
           console.error("Erro ao calcular rota:", status, result);
-          setErrorMessage(`Não foi possível calcular a rota (${status}).`);
+
+          if (!lastRoutedDestinationRef.current) {
+            setErrorMessage(`Não foi possível calcular a rota (${status}).`);
+          }
+
           return;
         }
 
         setErrorMessage("");
+        lastRouteUpdateRef.current = Date.now();
+        lastRoutedOriginRef.current = currentOrigin;
+        lastRoutedDestinationRef.current = currentDestination;
 
         let bestRouteIndex = 0;
         let bestDuration =
@@ -278,13 +386,13 @@ export default function MapView({
           destinationMarkerRef.current.setMap(mapObj.current);
         }
 
-        const bounds = new google.maps.LatLngBounds();
-        bounds.extend({
-          lat: location.latitude,
-          lng: location.longitude,
-        });
-        bounds.extend(destinationPosition);
-        mapObj.current.fitBounds(bounds);
+        if (!hasFittedCurrentRouteRef.current) {
+          const bounds = new google.maps.LatLngBounds();
+          bounds.extend(currentOrigin);
+          bounds.extend(destinationPosition);
+          mapObj.current?.fitBounds(bounds);
+          hasFittedCurrentRouteRef.current = true;
+        }
 
         const steps: Step[] = bestLeg.steps.map((step) => ({
           instruction: step.instructions.replace(/<[^>]+>/g, ""),
