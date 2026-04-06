@@ -96,6 +96,73 @@ function calculateDistanceMeters(
   return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
+function lerp(start: number, end: number, factor: number) {
+  return start + (end - start) * factor;
+}
+
+function normalizeAngle(angle: number) {
+  let normalized = angle % 360;
+  if (normalized < 0) normalized += 360;
+  return normalized;
+}
+
+function shortestAngleDelta(from: number, to: number) {
+  let delta = normalizeAngle(to) - normalizeAngle(from);
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  return delta;
+}
+
+function smoothAngle(from: number, to: number, factor: number) {
+  return normalizeAngle(from + shortestAngleDelta(from, to) * factor);
+}
+
+function getNavigationZoom(speed?: number | null) {
+  const speedKmh =
+    typeof speed === "number" && !Number.isNaN(speed) ? speed * 3.6 : 0;
+
+  if (speedKmh >= 90) return 16;
+  if (speedKmh >= 60) return 17;
+  if (speedKmh >= 25) return 18;
+  return 19;
+}
+
+function calculateBearing(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+) {
+  const phi1 = (lat1 * Math.PI) / 180;
+  const phi2 = (lat2 * Math.PI) / 180;
+  const lambda1 = (lng1 * Math.PI) / 180;
+  const lambda2 = (lng2 * Math.PI) / 180;
+
+  const y = Math.sin(lambda2 - lambda1) * Math.cos(phi2);
+  const x =
+    Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(lambda2 - lambda1);
+
+  const theta = Math.atan2(y, x);
+  return normalizeAngle((theta * 180) / Math.PI);
+}
+
+function getCarSymbol(
+  google: typeof window.google,
+  rotation: number
+): google.maps.Symbol {
+  return {
+    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
+    scale: 6,
+    rotation,
+    fillColor: "#2563eb",
+    fillOpacity: 1,
+    strokeColor: "#ffffff",
+    strokeWeight: 2,
+    anchor: new google.maps.Point(0, 2),
+  };
+}
+
 export default function MapView({
   location,
   destination,
@@ -109,9 +176,17 @@ export default function MapView({
   const destinationMarkerRef = useRef<google.maps.Marker | null>(null);
 
   const initializedRef = useRef(false);
+  const routeFittedRef = useRef(false);
+
   const lastRouteOriginRef = useRef<{ lat: number; lng: number } | null>(null);
   const lastRouteDestinationRef = useRef<{ lat: number; lng: number } | null>(null);
-  const routeFittedRef = useRef(false);
+
+  const animatedCenterRef = useRef<{ lat: number; lng: number } | null>(null);
+  const lastAnimatedAtRef = useRef(0);
+
+  const lastLocationForHeadingRef = useRef<{ lat: number; lng: number } | null>(null);
+  const headingRef = useRef(0);
+  const markerHeadingRef = useRef(0);
 
   const [mapReady, setMapReady] = useState(false);
   const [loadingMap, setLoadingMap] = useState(true);
@@ -149,6 +224,7 @@ export default function MapView({
           center,
           zoom: 18,
           tilt: 0,
+          heading: 0,
           disableDefaultUI: false,
           mapTypeControl: false,
           streetViewControl: false,
@@ -177,8 +253,12 @@ export default function MapView({
           position: center,
           map,
           title: "Você",
+          icon: getCarSymbol(google, 0),
+          zIndex: 999,
         });
 
+        animatedCenterRef.current = center;
+        lastLocationForHeadingRef.current = center;
         initializedRef.current = true;
         setMapReady(true);
         setLoadingMap(false);
@@ -206,26 +286,145 @@ export default function MapView({
   }, [location]);
 
   useEffect(() => {
-    if (!location || !mapObj.current) return;
+    if (!location || !mapObj.current || !window.google) return;
 
+    const google = window.google;
     const current = {
       lat: location.latitude,
       lng: location.longitude,
     };
 
-    if (originMarkerRef.current) {
-      originMarkerRef.current.setPosition(current);
+    const previousForHeading = lastLocationForHeadingRef.current;
+    const movedSinceHeadingRef = previousForHeading
+      ? calculateDistanceMeters(
+          previousForHeading.lat,
+          previousForHeading.lng,
+          current.lat,
+          current.lng
+        )
+      : 0;
+
+    if (previousForHeading && movedSinceHeadingRef >= 4) {
+      const rawBearing = calculateBearing(
+        previousForHeading.lat,
+        previousForHeading.lng,
+        current.lat,
+        current.lng
+      );
+
+      markerHeadingRef.current = smoothAngle(
+        markerHeadingRef.current,
+        rawBearing,
+        0.45
+      );
+
+      headingRef.current = smoothAngle(headingRef.current, rawBearing, 0.22);
+      lastLocationForHeadingRef.current = current;
+    } else if (!previousForHeading) {
+      lastLocationForHeadingRef.current = current;
     }
 
-    if (destination) {
-      mapObj.current.panTo(current);
+    if (originMarkerRef.current) {
+      originMarkerRef.current.setPosition(current);
+      originMarkerRef.current.setIcon(getCarSymbol(google, markerHeadingRef.current));
+    }
 
-      const currentZoom = mapObj.current.getZoom() ?? 18;
-      if (currentZoom < 17) {
-        mapObj.current.setZoom(17);
+    const map = mapObj.current;
+    const now = Date.now();
+
+    if (!destination) {
+      animatedCenterRef.current = current;
+      map.setCenter(current);
+
+      const idleZoom = 18;
+      if ((map.getZoom() ?? idleZoom) !== idleZoom) {
+        map.setZoom(idleZoom);
       }
-    } else if (!initializedRef.current) {
-      mapObj.current.setCenter(current);
+
+      if (typeof map.setHeading === "function") {
+        try {
+          map.setHeading(0);
+        } catch (error) {
+          console.log("Heading idle não suportado:", error);
+        }
+      }
+
+      if (typeof map.setTilt === "function") {
+        try {
+          map.setTilt(0);
+        } catch (error) {
+          console.log("Tilt idle não suportado:", error);
+        }
+      }
+
+      return;
+    }
+
+    const currentZoom = map.getZoom() ?? 18;
+    const targetZoom = getNavigationZoom(location.speed);
+
+    if (Math.abs(currentZoom - targetZoom) >= 1) {
+      map.setZoom(targetZoom);
+    }
+
+    if (typeof map.setTilt === "function") {
+      try {
+        map.setTilt(45);
+      } catch (error) {
+        console.log("Tilt 45 não suportado:", error);
+      }
+    }
+
+    if (typeof map.setHeading === "function") {
+      try {
+        map.setHeading(headingRef.current);
+      } catch (error) {
+        console.log("Rotação do mapa não suportada:", error);
+      }
+    }
+
+    const bounds = map.getBounds();
+    let projectedTarget = current;
+
+    if (bounds) {
+      const ne = bounds.getNorthEast();
+      const sw = bounds.getSouthWest();
+
+      const latSpan = Math.abs(ne.lat() - sw.lat());
+      const lngSpan = Math.abs(ne.lng() - sw.lng());
+
+      const headingRad = (headingRef.current * Math.PI) / 180;
+
+      const backwardOffsetLat = Math.cos(headingRad) * latSpan * 0.18;
+      const backwardOffsetLng = Math.sin(headingRad) * lngSpan * 0.18;
+
+      projectedTarget = {
+        lat: current.lat - backwardOffsetLat,
+        lng: current.lng - backwardOffsetLng,
+      };
+    }
+
+    const previousCenter = animatedCenterRef.current || projectedTarget;
+    const nextCenter = {
+      lat: lerp(previousCenter.lat, projectedTarget.lat, 0.30),
+      lng: lerp(previousCenter.lng, projectedTarget.lng, 0.30),
+    };
+
+    const movedCenter = calculateDistanceMeters(
+      previousCenter.lat,
+      previousCenter.lng,
+      nextCenter.lat,
+      nextCenter.lng
+    );
+
+    if (movedCenter >= 1.2 || now - lastAnimatedAtRef.current > 900) {
+      map.panTo(nextCenter);
+      animatedCenterRef.current = nextCenter;
+      lastAnimatedAtRef.current = now;
+    }
+
+    if (!routeFittedRef.current) {
+      animatedCenterRef.current = projectedTarget;
     }
   }, [location, destination]);
 
@@ -272,7 +471,7 @@ export default function MapView({
         )
       : Number.MAX_SAFE_INTEGER;
 
-    if (movedFromLastOrigin < 20 && movedDestination < 5) {
+    if (movedFromLastOrigin < 35 && movedDestination < 5) {
       return;
     }
 
@@ -341,6 +540,7 @@ export default function MapView({
           });
         } else {
           destinationMarkerRef.current.setPosition(destinationPosition);
+          destinationMarkerRef.current.setTitle(destination.name || "Destino");
           destinationMarkerRef.current.setMap(mapObj.current);
         }
 
@@ -357,9 +557,7 @@ export default function MapView({
           },
         }));
 
-        if (onStepsUpdate) {
-          onStepsUpdate(steps);
-        }
+        onStepsUpdate?.(steps);
       }
     );
   }, [mapReady, location, destination, onStepsUpdate]);
@@ -369,6 +567,12 @@ export default function MapView({
       routeFittedRef.current = false;
       lastRouteOriginRef.current = null;
       lastRouteDestinationRef.current = null;
+      animatedCenterRef.current = null;
+      lastLocationForHeadingRef.current = location
+        ? { lat: location.latitude, lng: location.longitude }
+        : null;
+      headingRef.current = 0;
+      markerHeadingRef.current = 0;
 
       if (directionsRenderer.current) {
         directionsRenderer.current.set("directions", null);
@@ -378,8 +582,30 @@ export default function MapView({
         destinationMarkerRef.current.setMap(null);
         destinationMarkerRef.current = null;
       }
+
+      if (originMarkerRef.current && window.google?.maps) {
+        originMarkerRef.current.setIcon(getCarSymbol(window.google, 0));
+      }
+
+      if (mapObj.current) {
+        if (typeof mapObj.current.setHeading === "function") {
+          try {
+            mapObj.current.setHeading(0);
+          } catch (error) {
+            console.log("Reset heading não suportado:", error);
+          }
+        }
+
+        if (typeof mapObj.current.setTilt === "function") {
+          try {
+            mapObj.current.setTilt(0);
+          } catch (error) {
+            console.log("Reset tilt não suportado:", error);
+          }
+        }
+      }
     }
-  }, [destination]);
+  }, [destination, location]);
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
