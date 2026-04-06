@@ -93,6 +93,16 @@ function arePointsDifferent(a?: LatLngLike | null, b?: LatLngLike | null) {
   );
 }
 
+function clearDirections(renderer: google.maps.DirectionsRenderer | null) {
+  if (!renderer) return;
+
+  try {
+    renderer.set("directions", null);
+  } catch {
+    // ignore
+  }
+}
+
 export default function MapView({
   location,
   destination,
@@ -107,10 +117,8 @@ export default function MapView({
   const destinationMarkerRef = useRef<google.maps.Marker | null>(null);
 
   const initializedRef = useRef(false);
-  const hasCenteredInitialLocationRef = useRef(false);
-  const hasFittedCurrentRouteRef = useRef(false);
+  const routeViewportKeyRef = useRef<string>("");
   const isRoutingRef = useRef(false);
-  const followUserRef = useRef(false);
   const lastRoutedOriginRef = useRef<LatLngLike | null>(null);
   const lastRoutedDestinationRef = useRef<LatLngLike | null>(null);
   const lastRouteUpdateRef = useRef(0);
@@ -158,14 +166,6 @@ export default function MapView({
           zoomControl: true,
         });
 
-        map.addListener("dragstart", () => {
-          followUserRef.current = false;
-        });
-
-        map.addListener("zoom_changed", () => {
-          followUserRef.current = false;
-        });
-
         mapObj.current = map;
         directionsServiceRef.current = new google.maps.DirectionsService();
 
@@ -189,7 +189,6 @@ export default function MapView({
           title: "Você",
         });
 
-        hasCenteredInitialLocationRef.current = true;
         initializedRef.current = true;
         setMapReady(true);
         setLoadingMap(false);
@@ -222,44 +221,29 @@ export default function MapView({
       originMarkerRef.current.setPosition(current);
     }
 
-    if (!hasCenteredInitialLocationRef.current) {
+    if (!initializedRef.current) {
       mapObj.current.setCenter(current);
-      hasCenteredInitialLocationRef.current = true;
-      return;
     }
-
-    if (followUserRef.current && !destination) {
-      mapObj.current.panTo(current);
-    }
-  }, [location, destination]);
+  }, [location]);
 
   useEffect(() => {
     if (!destination) {
-      hasFittedCurrentRouteRef.current = false;
+      routeViewportKeyRef.current = "";
       lastRoutedDestinationRef.current = null;
+      lastRoutedOriginRef.current = null;
+      lastRouteUpdateRef.current = 0;
+      setErrorMessage("");
 
       if (destinationMarkerRef.current) {
         destinationMarkerRef.current.setMap(null);
         destinationMarkerRef.current = null;
       }
 
-      if (directionsRenderer.current) {
-        directionsRenderer.current.setDirections({
-          routes: [],
-          request: {
-            travelMode: window.google?.maps?.TravelMode?.DRIVING,
-          },
-        } as unknown as google.maps.DirectionsResult);
-      }
+      clearDirections(directionsRenderer.current);
 
       if (onStepsUpdate) {
         onStepsUpdate([]);
       }
-
-      followUserRef.current = false;
-    } else {
-      followUserRef.current = false;
-      hasFittedCurrentRouteRef.current = false;
     }
   }, [destination, onStepsUpdate]);
 
@@ -278,10 +262,12 @@ export default function MapView({
     }
 
     const google = window.google;
+
     const currentOrigin = {
       lat: location.latitude,
       lng: location.longitude,
     };
+
     const currentDestination = {
       lat: destination.latitude,
       lng: destination.longitude,
@@ -396,12 +382,14 @@ export default function MapView({
           destinationMarkerRef.current.setMap(mapObj.current);
         }
 
-        if (!hasFittedCurrentRouteRef.current) {
+        const viewportKey = `${destinationPosition.lat.toFixed(6)}:${destinationPosition.lng.toFixed(6)}`;
+
+        if (routeViewportKeyRef.current !== viewportKey) {
           const bounds = new google.maps.LatLngBounds();
           bounds.extend(currentOrigin);
           bounds.extend(destinationPosition);
           mapObj.current.fitBounds(bounds);
-          hasFittedCurrentRouteRef.current = true;
+          routeViewportKeyRef.current = viewportKey;
         }
 
         const steps: Step[] = bestLeg.steps.map((step) => ({
