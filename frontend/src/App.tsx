@@ -21,7 +21,7 @@ type Step = {
 type NavigationSuggestion = {
   text: string;
   placeId?: string;
-  type?: "favorite" | "recent" | "known" | "google";
+  type?: "favorite" | "recent" | "google";
 };
 
 type QuickAccessItem = {
@@ -29,13 +29,21 @@ type QuickAccessItem = {
   label?: string;
   address?: string;
   name?: string;
+  latitude?: number;
+  longitude?: number;
 };
 
 type DeviceLocation = {
   latitude: number;
   longitude: number;
   accuracy?: number | null;
-} | null;
+};
+
+type Destination = {
+  latitude: number;
+  longitude: number;
+  name?: string;
+};
 
 function normalizeText(value: string) {
   return String(value || "")
@@ -48,34 +56,23 @@ function normalizeText(value: string) {
 function looksLikeNavigationInput(value: string) {
   const text = normalizeText(value);
 
-  if (text.length < 2) return false;
-
-  const blockedTerms = [
-    "onde estou",
-    "onde eu estou",
-    "qual minha localizacao",
-    "qual minha localização",
-    "minha localizacao",
-    "minha localização",
-    "clima",
-    "tempo",
-    "temperatura",
-    "vai chover",
-    "quem e",
-    "quem é",
-    "o que e",
-    "o que é",
-    "oque e",
-    "oque é",
-  ];
-
-  if (blockedTerms.some((term) => text.includes(normalizeText(term)))) {
-    return false;
-  }
-
-  if (text.includes("?")) return false;
-
-  return true;
+  return (
+    text.startsWith("navegar") ||
+    text.startsWith("ir para") ||
+    text.startsWith("ir pra") ||
+    text.startsWith("rota") ||
+    text.startsWith("me leve") ||
+    text.startsWith("me leva") ||
+    text.includes("rua ") ||
+    text.includes("avenida ") ||
+    text.includes("av ") ||
+    text.includes("estrada ") ||
+    text.includes("rodovia ") ||
+    text.includes("travessa ") ||
+    text.includes("alameda ") ||
+    text.includes("praca ") ||
+    text.includes("praça ")
+  );
 }
 
 function generateSessionToken() {
@@ -86,26 +83,66 @@ function generateSessionToken() {
   return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function calculateDistanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+) {
+  const R = 6371000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function shouldAcceptLocationUpdate(
+  previous: DeviceLocation | null,
+  next: DeviceLocation
+) {
+  if (!previous) return true;
+
+  const distance = calculateDistanceMeters(
+    previous.latitude,
+    previous.longitude,
+    next.latitude,
+    next.longitude
+  );
+
+  const previousAccuracy = previous.accuracy ?? Number.MAX_SAFE_INTEGER;
+  const nextAccuracy = next.accuracy ?? Number.MAX_SAFE_INTEGER;
+
+  if (distance >= 12) return true;
+  if (nextAccuracy + 8 < previousAccuracy) return true;
+
+  return false;
+}
+
 export default function App() {
   const [status, setStatus] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [deviceLocation, setDeviceLocation] = useState<DeviceLocation>(null);
-  const [destination, setDestination] = useState<any>(null);
+  const [deviceLocation, setDeviceLocation] = useState<DeviceLocation | null>(null);
+  const [destination, setDestination] = useState<Destination | null>(null);
   const [steps, setSteps] = useState<Step[]>([]);
   const [showMap, setShowMap] = useState(false);
 
   const [suggestions, setSuggestions] = useState<NavigationSuggestion[]>([]);
   const [isSuggesting, setIsSuggesting] = useState(false);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [suggestionError, setSuggestionError] = useState("");
 
   const [favorites, setFavorites] = useState<QuickAccessItem[]>([]);
   const [recent, setRecent] = useState<QuickAccessItem[]>([]);
 
   const debounceRef = useRef<number | null>(null);
   const sessionTokenRef = useRef(generateSessionToken());
-  const locationRef = useRef<DeviceLocation>(null);
+  const lastAcceptedLocationRef = useRef<DeviceLocation | null>(null);
+  const lastLocationUpdateAtRef = useRef(0);
 
   useEffect(() => {
     checkHealth()
@@ -128,57 +165,59 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    locationRef.current = deviceLocation;
-  }, [deviceLocation]);
-
-  useEffect(() => {
     if (!navigator.geolocation) {
       console.log("Geolocalização não suportada");
       return;
     }
 
+    function applyLocation(loc: DeviceLocation, force = false) {
+      const now = Date.now();
+      const tooSoon = now - lastLocationUpdateAtRef.current < 1500;
+
+      if (!force && tooSoon && !shouldAcceptLocationUpdate(lastAcceptedLocationRef.current, loc)) {
+        return;
+      }
+
+      if (!force && !shouldAcceptLocationUpdate(lastAcceptedLocationRef.current, loc)) {
+        return;
+      }
+
+      lastAcceptedLocationRef.current = loc;
+      lastLocationUpdateAtRef.current = now;
+      setDeviceLocation(loc);
+    }
+
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        setDeviceLocation({
+        const loc = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
           accuracy: pos.coords.accuracy ?? null,
-        });
+        };
+
+        console.log("LOCALIZAÇÃO INICIAL:", loc);
+        applyLocation(loc, true);
       },
       (error) => {
         console.log("Erro localização inicial:", error);
       },
       {
         enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0,
+        timeout: 15000,
+        maximumAge: 5000,
       }
     );
 
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        const nextLoc = {
+        const loc = {
           latitude: pos.coords.latitude,
           longitude: pos.coords.longitude,
           accuracy: pos.coords.accuracy ?? null,
         };
 
-        setDeviceLocation((prev) => {
-          if (!prev) return nextLoc;
-
-          const sameLat =
-            Math.abs(Number(prev.latitude) - Number(nextLoc.latitude)) < 0.00002;
-          const sameLng =
-            Math.abs(Number(prev.longitude) - Number(nextLoc.longitude)) < 0.00002;
-          const sameAccuracy =
-            Number(prev.accuracy || 0) === Number(nextLoc.accuracy || 0);
-
-          if (sameLat && sameLng && sameAccuracy) {
-            return prev;
-          }
-
-          return nextLoc;
-        });
+        console.log("LOCALIZAÇÃO ATUALIZADA:", loc);
+        applyLocation(loc);
       },
       (error) => {
         console.log("Erro geolocalização:", error);
@@ -186,7 +225,7 @@ export default function App() {
       {
         enableHighAccuracy: true,
         maximumAge: 3000,
-        timeout: 10000,
+        timeout: 15000,
       }
     );
 
@@ -195,50 +234,31 @@ export default function App() {
 
   useEffect(() => {
     const trimmed = input.trim();
-    const canSuggest = looksLikeNavigationInput(trimmed);
 
     if (debounceRef.current) {
       window.clearTimeout(debounceRef.current);
     }
 
-    if (!canSuggest) {
+    if (trimmed.length < 2 || !looksLikeNavigationInput(trimmed)) {
       setSuggestions([]);
       setIsSuggesting(false);
-      setSuggestionError("");
-      setShowSuggestions(false);
       return;
     }
-
-    setShowSuggestions(true);
 
     debounceRef.current = window.setTimeout(async () => {
       try {
         setIsSuggesting(true);
-        setSuggestionError("");
 
         const res = await suggestNavigation(
           trimmed,
-          locationRef.current,
+          deviceLocation,
           sessionTokenRef.current
         );
 
-        const nextSuggestions = Array.isArray(res?.suggestions)
-          ? res.suggestions
-          : [];
-
-        console.log("Sugestões recebidas:", nextSuggestions);
-
-        setSuggestions(nextSuggestions);
-
-        if (nextSuggestions.length === 0) {
-          setSuggestionError("Nenhuma sugestão encontrada para esse destino.");
-        } else {
-          setSuggestionError("");
-        }
+        setSuggestions(Array.isArray(res?.suggestions) ? res.suggestions : []);
       } catch (error) {
         console.log("Erro ao buscar sugestões:", error);
         setSuggestions([]);
-        setSuggestionError("Não foi possível carregar as sugestões agora.");
       } finally {
         setIsSuggesting(false);
       }
@@ -249,7 +269,12 @@ export default function App() {
         window.clearTimeout(debounceRef.current);
       }
     };
-  }, [input]);
+  }, [input, deviceLocation]);
+
+  const iniciarNavegacao = (dest: Destination) => {
+    if (!dest?.name) return;
+    console.log("Navegação interna iniciada:", dest);
+  };
 
   async function refreshQuickAccess() {
     try {
@@ -265,12 +290,12 @@ export default function App() {
     const trimmed = String(messageOverride ?? input).trim();
     if (!trimmed) return;
 
-    setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
+    console.log("ENVIANDO COM LOCALIZAÇÃO:", deviceLocation);
 
     setSuggestions([]);
-    setSuggestionError("");
-    setShowSuggestions(false);
     setIsSuggesting(false);
+
+    setMessages((prev) => [...prev, { role: "user", content: trimmed }]);
 
     try {
       const res = await sendChatMessage(trimmed, deviceLocation);
@@ -279,16 +304,27 @@ export default function App() {
         ...prev,
         {
           role: "assistant",
-          content: res.reply,
+          content: res?.reply || "Mensagem recebida.",
         },
       ]);
 
       if (res?.meta?.navigation?.active && res?.meta?.navigation?.destination) {
-        const nextDestination = res.meta.navigation.destination;
+        const nextDestination = res.meta.navigation.destination as Destination;
+
         setDestination(nextDestination);
         setSteps([]);
         setShowMap(true);
+
+        setTimeout(() => {
+          iniciarNavegacao(nextDestination);
+        }, 400);
+
         await refreshQuickAccess();
+      }
+
+      if (res?.meta?.navigation?.active === false) {
+        setDestination(null);
+        setSteps([]);
       }
 
       sessionTokenRef.current = generateSessionToken();
@@ -310,8 +346,6 @@ export default function App() {
   function handleSuggestionSelect(suggestion: NavigationSuggestion) {
     setInput(suggestion.text);
     setSuggestions([]);
-    setSuggestionError("");
-    setShowSuggestions(false);
     handleSend(suggestion.text);
   }
 
@@ -326,7 +360,6 @@ export default function App() {
   function renderSuggestionBadge(type?: string) {
     if (type === "favorite") return "⭐";
     if (type === "recent") return "🕘";
-    if (type === "known") return "📌";
     return "📍";
   }
 
@@ -334,7 +367,7 @@ export default function App() {
     <div style={{ display: "flex", height: "100vh", background: "#343541" }}>
       <aside
         style={{
-          width: 280,
+          width: 260,
           background: "#202123",
           padding: 20,
           color: "#fff",
@@ -345,7 +378,7 @@ export default function App() {
         }}
       >
         <div>
-          <h2 style={{ marginTop: 0 }}>Megan OS</h2>
+          <h2>Megan OS</h2>
           <p style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</p>
 
           <div style={{ marginTop: 20 }}>
@@ -414,7 +447,6 @@ export default function App() {
             borderRadius: 8,
             color: "#fff",
             cursor: "pointer",
-            fontWeight: 700,
           }}
         >
           🗺️ {showMap ? "Fechar mapa" : "Abrir mapa"}
@@ -456,14 +488,8 @@ export default function App() {
           ))}
         </div>
 
-        <div
-          style={{
-            padding: 20,
-            borderTop: "1px solid #444",
-            position: "relative",
-          }}
-        >
-          {showSuggestions && (isSuggesting || suggestionError || suggestions.length > 0) && (
+        <div style={{ padding: 20, borderTop: "1px solid #444", position: "relative" }}>
+          {(suggestions.length > 0 || isSuggesting) && (
             <div
               style={{
                 position: "absolute",
@@ -478,7 +504,7 @@ export default function App() {
                 zIndex: 20,
               }}
             >
-              {isSuggesting && (
+              {isSuggesting && suggestions.length === 0 && (
                 <div
                   style={{
                     padding: 14,
@@ -490,45 +516,28 @@ export default function App() {
                 </div>
               )}
 
-              {!isSuggesting && suggestions.length > 0 && (
-                <>
-                  {suggestions.map((item, index) => (
-                    <button
-                      key={`${item.text}-${index}`}
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => handleSuggestionSelect(item)}
-                      style={{
-                        width: "100%",
-                        textAlign: "left",
-                        padding: "14px 16px",
-                        border: "none",
-                        borderBottom:
-                          index !== suggestions.length - 1
-                            ? "1px solid rgba(255,255,255,0.08)"
-                            : "none",
-                        background: "transparent",
-                        color: "#fff",
-                        cursor: "pointer",
-                        fontSize: 14,
-                      }}
-                    >
-                      {renderSuggestionBadge(item.type)} {item.text}
-                    </button>
-                  ))}
-                </>
-              )}
-
-              {!isSuggesting && suggestions.length === 0 && suggestionError && (
-                <div
+              {suggestions.map((item, index) => (
+                <button
+                  key={`${item.text}-${index}`}
+                  onClick={() => handleSuggestionSelect(item)}
                   style={{
-                    padding: 14,
-                    color: "#cbd5e1",
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "14px 16px",
+                    border: "none",
+                    borderBottom:
+                      index !== suggestions.length - 1
+                        ? "1px solid rgba(255,255,255,0.08)"
+                        : "none",
+                    background: "transparent",
+                    color: "#fff",
+                    cursor: "pointer",
                     fontSize: 14,
                   }}
                 >
-                  {suggestionError}
-                </div>
-              )}
+                  {renderSuggestionBadge(item.type)} {item.text}
+                </button>
+              ))}
             </div>
           )}
 
@@ -536,16 +545,6 @@ export default function App() {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onFocus={() => {
-                if (looksLikeNavigationInput(input.trim())) {
-                  setShowSuggestions(true);
-                }
-              }}
-              onBlur={() => {
-                window.setTimeout(() => {
-                  setShowSuggestions(false);
-                }, 200);
-              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleSend();
               }}
@@ -567,7 +566,6 @@ export default function App() {
                 borderRadius: 8,
                 color: "#fff",
                 cursor: "pointer",
-                fontWeight: 700,
               }}
             >
               Enviar
@@ -576,7 +574,7 @@ export default function App() {
         </div>
       </main>
 
-      {showMap && deviceLocation && (
+      {showMap && (
         <div
           style={{
             position: "fixed",
@@ -603,26 +601,57 @@ export default function App() {
                 color: "#fff",
                 border: "1px solid rgba(255,255,255,0.12)",
                 borderRadius: 12,
-                padding: "12px 18px",
+                padding: "10px 14px",
                 cursor: "pointer",
                 fontWeight: 700,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+                backdropFilter: "blur(8px)",
               }}
             >
               Fechar mapa
             </button>
           </div>
 
-          <MapView
-            location={deviceLocation}
-            destination={destination}
-            onStepsUpdate={setSteps}
-          />
+          {destination && (
+            <div
+              style={{
+                position: "absolute",
+                top: 16,
+                left: 16,
+                zIndex: 1002,
+                width: 360,
+                maxWidth: "calc(100vw - 32px)",
+              }}
+            >
+              <DrivingMode destination={destination} steps={steps} />
+            </div>
+          )}
 
-          <DrivingMode
-            location={deviceLocation}
-            destination={destination}
-            steps={steps}
-          />
+          {!deviceLocation && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#fff",
+                zIndex: 1001,
+                padding: 24,
+                textAlign: "center",
+              }}
+            >
+              Aguardando a localização atual do aparelho para abrir o mapa.
+            </div>
+          )}
+
+          <div style={{ width: "100%", height: "100%" }}>
+            <MapView
+              location={deviceLocation}
+              destination={destination}
+              onStepsUpdate={setSteps}
+            />
+          </div>
         </div>
       )}
     </div>
