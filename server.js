@@ -659,19 +659,86 @@ async function geocodeDestination(query) {
   return null;
 }
 
+function buildLocalSuggestionCandidates(input) {
+  const normalizedInput = normalizeText(input);
+  const localCandidates = [];
+
+  for (const item of favoriteDestinations) {
+    localCandidates.push({
+      text: `${item.label} — ${item.address}`,
+      placeId: "",
+      type: "favorite",
+    });
+    localCandidates.push({
+      text: item.address,
+      placeId: "",
+      type: "favorite",
+    });
+    localCandidates.push({
+      text: item.label,
+      placeId: "",
+      type: "favorite",
+    });
+  }
+
+  for (const item of recentDestinations) {
+    localCandidates.push({
+      text: item.name,
+      placeId: "",
+      type: "recent",
+    });
+  }
+
+  localCandidates.push(
+    {
+      text: "Praça da Moça, Centro, Diadema - SP",
+      placeId: "",
+      type: "google",
+    },
+    {
+      text: "Rua Presidente Wenceslau, Eldorado, Diadema - SP, Brasil",
+      placeId: "",
+      type: "google",
+    }
+  );
+
+  const filtered = localCandidates.filter((item) => {
+    const normalizedText = normalizeText(item.text);
+    return (
+      normalizedText.includes(normalizedInput) ||
+      normalizedInput.includes(normalizedText)
+    );
+  });
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const item of filtered) {
+    const key = normalizeText(item.text);
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(item);
+    }
+  }
+
+  return unique.slice(0, 8);
+}
+
 /* =========================
    AUTOCOMPLETE GOOGLE PLACES
 ========================= */
 async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionToken) {
   const googleMapsApiKey = process.env.GOOGLE_MAPS_API_KEY || "";
+  const cleanedInput = String(input || "").trim();
+
+  if (cleanedInput.length < 2) return [];
+
+  const localFallback = buildLocalSuggestionCandidates(cleanedInput);
 
   if (!googleMapsApiKey) {
     console.error("❌ GOOGLE_MAPS_API_KEY não configurada no backend");
-    return [];
+    return localFallback;
   }
-
-  const cleanedInput = String(input || "").trim();
-  if (cleanedInput.length < 2) return [];
 
   const body = {
     input: cleanedInput,
@@ -703,7 +770,7 @@ async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionTok
         "Content-Type": "application/json",
         "X-Goog-Api-Key": googleMapsApiKey,
         "X-Goog-FieldMask":
-          "suggestions.placePrediction.text.text,suggestions.placePrediction.placeId",
+          "suggestions.placePrediction.placeId,suggestions.placePrediction.text.text",
       },
       body: JSON.stringify(body),
     });
@@ -712,10 +779,10 @@ async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionTok
 
     if (!res.ok) {
       console.error("❌ Places Autocomplete HTTP ERROR:", res.status, data);
-      return [];
+      return localFallback;
     }
 
-    const suggestions = Array.isArray(data?.suggestions)
+    const googleSuggestions = Array.isArray(data?.suggestions)
       ? data.suggestions
           .map((item) => {
             const prediction = item?.placePrediction;
@@ -727,41 +794,13 @@ async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionTok
             return {
               text,
               placeId,
+              type: "google",
             };
           })
           .filter(Boolean)
       : [];
 
-    const recent = recentDestinations
-      .filter((item) =>
-        normalizeText(item.name).includes(normalizeText(cleanedInput))
-      )
-      .map((item) => ({
-        text: item.name,
-        placeId: "",
-        type: "recent",
-      }));
-
-    const favorites = favoriteDestinations
-      .filter((item) => {
-        const normalizedInput = normalizeText(cleanedInput);
-        return (
-          normalizeText(item.label).includes(normalizedInput) ||
-          normalizeText(item.address).includes(normalizedInput)
-        );
-      })
-      .map((item) => ({
-        text: `${item.label} — ${item.address}`,
-        placeId: "",
-        type: "favorite",
-      }));
-
-    const merged = [
-      ...favorites,
-      ...recent,
-      ...suggestions.map((item) => ({ ...item, type: "google" })),
-    ];
-
+    const merged = [...localFallback, ...googleSuggestions];
     const unique = [];
     const seen = new Set();
 
@@ -776,7 +815,7 @@ async function getPlaceAutocompleteSuggestions(input, deviceLocation, sessionTok
     return unique.slice(0, 8);
   } catch (error) {
     console.error("❌ Erro autocomplete Google Places:", error);
-    return [];
+    return localFallback;
   }
 }
 
