@@ -25,11 +25,9 @@ type NavigationPayload = {
 
 export async function checkHealth() {
   const res = await fetch(`${API_URL}/api/health`);
-
   if (!res.ok) {
     throw new Error("Falha ao verificar backend");
   }
-
   return res.json();
 }
 
@@ -64,37 +62,44 @@ export async function suggestNavigation(
   deviceLocation?: DeviceLocation,
   sessionToken?: string
 ) {
-  const res = await fetch(`${API_URL}/api/navigation/suggest`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      input,
-      deviceLocation: deviceLocation || null,
-      sessionToken: sessionToken || null,
-    }),
-  });
+  try {
+    const res = await fetch(`${API_URL}/api/navigation/suggest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        input,
+        deviceLocation: deviceLocation || null,
+        sessionToken: sessionToken || null,
+      }),
+    });
 
-  const data = await res.json();
+    const data = await res.json();
 
-  if (!res.ok) {
-    throw new Error(data?.error || "Erro ao buscar sugestões");
+    if (!res.ok) {
+      return { suggestions: [] };
+    }
+
+    return data;
+  } catch {
+    return { suggestions: [] };
   }
-
-  return data;
 }
 
 export async function getNavigationQuickAccess() {
-  const res = await fetch(`${API_URL}/api/navigation/quick-access`);
+  try {
+    const res = await fetch(`${API_URL}/api/navigation/quick-access`);
+    const data = await res.json();
 
-  const data = await res.json();
+    if (!res.ok) {
+      return { favorites: [], recent: [] };
+    }
 
-  if (!res.ok) {
-    throw new Error(data?.error || "Erro ao buscar atalhos");
+    return data;
+  } catch {
+    return { favorites: [], recent: [] };
   }
-
-  return data;
 }
 
 export async function resolveNavigationDestination(
@@ -102,23 +107,27 @@ export async function resolveNavigationDestination(
   deviceLocation?: DeviceLocation,
   placeId?: string
 ) {
-  const res = await fetch(`${API_URL}/api/navigation/resolve`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      input,
-      deviceLocation: deviceLocation || null,
-      placeId: placeId || null,
-    }),
-  });
+  try {
+    const res = await fetch(`${API_URL}/api/navigation/resolve`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        input,
+        deviceLocation: deviceLocation || null,
+        placeId: placeId || null,
+      }),
+    });
 
-  const data = await res.json();
+    const data = await res.json();
 
-  if (!res.ok) {
-    throw new Error(data?.error || "Erro ao resolver destino");
+    if (!res.ok) {
+      throw new Error(data?.error || "Erro ao resolver destino");
+    }
+
+    return data;
+  } catch {
+    return null;
   }
-
-  return data;
 }
