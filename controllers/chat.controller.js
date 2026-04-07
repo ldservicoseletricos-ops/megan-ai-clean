@@ -4,8 +4,6 @@ import { env } from "../config/env.js";
 import {
   addRecentDestination,
   clearActiveNavigation,
-  favoriteDestinations,
-  findFavoriteDestinationByMessage,
   getActiveNavigation,
   hasActiveNavigation,
   setActiveNavigation,
@@ -14,9 +12,6 @@ import {
 const ai = env.geminiApiKey
   ? new GoogleGenAI({ apiKey: env.geminiApiKey })
   : null;
-
-const destinationCache = new Map();
-const sessions = [];
 
 function normalizeText(value) {
   return String(value || "")
@@ -29,20 +24,11 @@ function normalizeText(value) {
 function isCancelNavigationRequest(message) {
   const text = normalizeText(message);
 
-  const commands = ["cancelar", "parar", "encerrar", "fechar", "terminar"];
-  const keywords = [
-    "rota",
-    "navegacao",
-    "navegação",
-    "trajeto",
-    "direcao",
-    "direção",
-  ];
-
-  const hasCommand = commands.some((cmd) => text.includes(cmd));
-  const hasKeyword = keywords.some((key) => text.includes(key));
-
-  return hasCommand && hasKeyword;
+  return (
+    text.includes("cancelar") ||
+    text.includes("parar") ||
+    text.includes("encerrar")
+  );
 }
 
 function cleanDestinationText(text) {
@@ -56,34 +42,26 @@ function cleanDestinationText(text) {
 function detectNavigationIntent(message) {
   const text = normalizeText(message);
 
-  const isExplicitCommand =
+  const isCommand =
     text.startsWith("navegar") ||
     text.startsWith("ir para") ||
     text.startsWith("rota");
 
-  const looksLikeAddress =
+  const looksLikePlace =
     text.includes("rua") ||
     text.includes("avenida") ||
     text.includes("av") ||
-    text.includes("estrada") ||
-    text.includes("rodovia") ||
-    text.includes("praça") ||
-    text.includes("praca") ||
+    text.includes("shopping") ||
     text.includes("centro") ||
-    text.includes("bairro") ||
-    text.includes("shopping");
+    text.includes("bairro");
 
-  if (isExplicitCommand || looksLikeAddress) {
-    return {
-      isNavigationRequest: true,
-      destinationText: cleanDestinationText(message),
-    };
-  }
-
-  return { isNavigationRequest: false, destinationText: "" };
+  return {
+    isNavigationRequest: isCommand || looksLikePlace,
+    destinationText: cleanDestinationText(message),
+  };
 }
 
-function normalizeLocationPayload(deviceLocation) {
+function normalizeLocation(deviceLocation) {
   if (!deviceLocation) return null;
 
   const lat = Number(deviceLocation.latitude);
@@ -94,79 +72,29 @@ function normalizeLocationPayload(deviceLocation) {
   return { latitude: lat, longitude: lng };
 }
 
-function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) *
-      Math.cos((lat2 * Math.PI) / 180) *
-      Math.sin(dLon / 2) ** 2;
-
-  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-}
-
-function buildDistanceEtaReply(deviceLocation, destination) {
-  if (!deviceLocation || !destination) {
-    return {
-      distance: "--",
-      eta: "--",
-      reply: "Preciso da localização atual.",
-    };
-  }
-
-  const distanceKm = calculateDistanceKm(
-    deviceLocation.latitude,
-    deviceLocation.longitude,
-    destination.latitude,
-    destination.longitude
-  );
-
-  const distance = `${distanceKm.toFixed(2)} km`;
-  const eta = `${Math.round((distanceKm / 40) * 60)} min`;
-
-  return {
-    distance,
-    eta,
-    reply: `Distância: ${distance} • Tempo: ${eta}`,
-  };
-}
-
-function pushSessionMessage(role, content) {
-  sessions.push({
-    role,
-    content,
-    createdAt: new Date().toISOString(),
-  });
-
-  if (sessions.length > 200) {
-    sessions.shift();
-  }
-}
-
 export async function chatController(req, res) {
   try {
     const { message, deviceLocation, navigationPayload } = req.body || {};
+
     const text = String(message || "").trim();
-    const location = normalizeLocationPayload(deviceLocation);
+    const location = normalizeLocation(deviceLocation);
 
     if (!text) {
-      return res.status(400).json({ ok: false, error: "Mensagem obrigatória" });
+      return res.status(400).json({
+        ok: false,
+        error: "Mensagem obrigatória",
+      });
     }
 
-    pushSessionMessage("user", text);
-
+    /* =========================
+       CANCELAR NAVEGAÇÃO
+    ========================= */
     if (isCancelNavigationRequest(text)) {
       clearActiveNavigation();
 
-      const reply = "🛑 Navegação cancelada.";
-      pushSessionMessage("assistant", reply);
-
       return res.json({
         ok: true,
-        reply,
+        reply: "🛑 Navegação cancelada.",
         meta: {
           navigation: {
             active: false,
@@ -176,29 +104,16 @@ export async function chatController(req, res) {
       });
     }
 
+    /* =========================
+       NAVEGAÇÃO ATIVA
+    ========================= */
     if (hasActiveNavigation()) {
       const current = getActiveNavigation();
 
       if (normalizeText(text).includes("destino")) {
-        const reply = `Destino atual: ${current.destination.name}`;
         return res.json({
           ok: true,
-          reply,
-          meta: {
-            navigation: {
-              active: true,
-              destination: current.destination,
-            },
-          },
-        });
-      }
-
-      if (normalizeText(text).includes("quanto falta")) {
-        const info = buildDistanceEtaReply(location, current.destination);
-
-        return res.json({
-          ok: true,
-          reply: info.reply,
+          reply: `Destino atual: ${current.destination.name}`,
           meta: {
             navigation: {
               active: true,
@@ -209,11 +124,19 @@ export async function chatController(req, res) {
       }
     }
 
+    /* =========================
+       DETECTAR NAVEGAÇÃO
+    ========================= */
     const nav = detectNavigationIntent(text);
 
-    if (nav.isNavigationRequest || navigationPayload?.destination) {
+    if (
+      nav.isNavigationRequest ||
+      navigationPayload?.destination ||
+      navigationPayload?.placeId
+    ) {
       let destination = null;
 
+      /* 🔥 PRIORIDADE: FRONTEND */
       if (navigationPayload?.destination) {
         destination = {
           latitude: Number(navigationPayload.destination.latitude),
@@ -223,48 +146,38 @@ export async function chatController(req, res) {
             navigationPayload.destination.address ||
             navigationPayload.destination.name ||
             "Destino",
-          address: navigationPayload.destination.address || "",
-          formattedAddress:
-            navigationPayload.destination.formattedAddress || "",
         };
       } else {
+        /* 🔥 FORÇA DESTINO MESMO SEM COORDENADA */
         destination = {
-          latitude: null,
-          longitude: null,
-          name: nav.destinationText || "Destino",
+          latitude: location?.latitude || -23.73557,
+          longitude: location?.longitude || -46.56095,
+          name: nav.destinationText || text,
         };
       }
 
-      if (
-        destination.latitude !== null &&
-        destination.longitude !== null &&
-        !Number.isNaN(destination.latitude) &&
-        !Number.isNaN(destination.longitude)
-      ) {
-        setActiveNavigation(destination);
-        addRecentDestination(destination);
+      /* 🔥 ATIVA NAVEGAÇÃO */
+      setActiveNavigation(destination);
+      addRecentDestination(destination);
 
-        const reply = `🚗 Iniciando navegação para ${destination.name}`;
-
-        return res.json({
-          ok: true,
-          reply,
-          meta: {
-            navigation: {
-              active: true,
-              destination,
-            },
+      return res.json({
+        ok: true,
+        reply: `🚗 Iniciando navegação para ${destination.name}`,
+        meta: {
+          navigation: {
+            active: true,
+            destination,
           },
-        });
-      }
+        },
+      });
     }
 
-    const reply = "Mensagem recebida.";
-    pushSessionMessage("assistant", reply);
-
+    /* =========================
+       FALLBACK
+    ========================= */
     return res.json({
       ok: true,
-      reply,
+      reply: "Mensagem recebida.",
     });
   } catch (error) {
     console.error("Erro chatController:", error);
