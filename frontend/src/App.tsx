@@ -556,7 +556,7 @@ export default function App() {
     );
 
     return () => navigator.geolocation.clearWatch(watchId);
-  }, [navigationActive]);
+  }, []);
 
   useEffect(() => {
     if (gpsRefreshIntervalRef.current) {
@@ -651,6 +651,18 @@ export default function App() {
     setRouteSummary(null);
     setRecenterSignal(0);
     setMapInstanceKey((prev) => prev + 1);
+  }
+
+  function abrirNoWaze() {
+    if (!destination) return;
+
+    const lat = Number(destination.latitude);
+    const lng = Number(destination.longitude);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+    const url = `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
+    window.open(url, "_blank", "noopener,noreferrer");
   }
 
   async function handleSend(
@@ -917,6 +929,28 @@ export default function App() {
             }}
           >
             Encerrar navegacao
+          </button>
+
+          <button
+            onClick={abrirNoWaze}
+            disabled={!destination}
+            style={{
+              width: isMobile ? "100%" : "auto",
+              background: destination
+                ? "rgba(16,163,127,0.92)"
+                : "rgba(75,85,99,0.92)",
+              color: "#fff",
+              border: "1px solid rgba(255,255,255,0.12)",
+              borderRadius: 12,
+              padding: isMobile ? "12px 14px" : "10px 14px",
+              cursor: destination ? "pointer" : "not-allowed",
+              fontWeight: 700,
+              boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
+              backdropFilter: "blur(8px)",
+              opacity: destination ? 1 : 0.7,
+            }}
+          >
+            Abrir no Waze
           </button>
         </div>
 

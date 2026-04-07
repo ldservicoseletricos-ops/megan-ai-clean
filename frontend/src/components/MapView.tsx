@@ -16,6 +16,16 @@ type LatLngPoint = {
   lng: number;
 };
 
+type RouteSummary = {
+  distanceText: string;
+  distanceMeters: number;
+  durationText: string;
+  durationSeconds: number;
+  trafficDurationText?: string;
+  trafficDurationSeconds?: number;
+  destinationLabel?: string;
+};
+
 type MapViewProps = {
   location: {
     latitude: number;
@@ -29,6 +39,7 @@ type MapViewProps = {
     name?: string;
   } | null;
   onStepsUpdate?: (steps: Step[]) => void;
+  onRouteDataUpdate?: (summary: RouteSummary | null) => void;
   recenterSignal?: number;
 };
 
@@ -229,6 +240,7 @@ export default function MapView({
   location,
   destination,
   onStepsUpdate,
+  onRouteDataUpdate,
   recenterSignal = 0,
 }: MapViewProps) {
   const mapRef = useRef<HTMLDivElement | null>(null);
@@ -294,7 +306,7 @@ export default function MapView({
     programmaticMoveRef.current = true;
 
     map.setCenter(current);
-    map.setZoom(getNavigationZoom(speed));
+    map.setZoom(getNavigationZoom(speed ?? 0));
 
     if (typeof map.setTilt === "function") {
       try {
@@ -482,8 +494,8 @@ export default function MapView({
     const now = Date.now();
 
     if (!destination) {
-      navigationReadyRef.current = false;
       followUserRef.current = true;
+      navigationReadyRef.current = false;
       setShowRecenter(false);
       animatedCenterRef.current = current;
       map.setCenter(current);
@@ -508,6 +520,7 @@ export default function MapView({
         }
       }
 
+      onRouteDataUpdate?.(null);
       return;
     }
 
@@ -724,6 +737,7 @@ export default function MapView({
         if (status !== "OK" || !result || !result.routes?.length) {
           console.error("Erro ao calcular rota:", status, result);
           setErrorMessage(`Não foi possível calcular a rota (${status}).`);
+          onRouteDataUpdate?.(null);
           return;
         }
 
@@ -763,6 +777,18 @@ export default function MapView({
         offRouteSampleCountRef.current = 0;
         lastConfirmedOnRouteRef.current = currentOrigin;
 
+        onRouteDataUpdate?.({
+          distanceText: bestLeg.distance?.text || "--",
+          distanceMeters: Number(bestLeg.distance?.value || 0),
+          durationText: bestLeg.duration?.text || "--",
+          durationSeconds: Number(bestLeg.duration?.value || 0),
+          trafficDurationText: bestLeg.duration_in_traffic?.text || undefined,
+          trafficDurationSeconds: bestLeg.duration_in_traffic?.value
+            ? Number(bestLeg.duration_in_traffic.value)
+            : undefined,
+          destinationLabel: destination.name || "Destino",
+        });
+
         const steps: Step[] = bestLeg.steps.map((step) => ({
           instruction: step.instructions.replace(/<[^>]+>/g, ""),
           end_location: {
@@ -774,7 +800,7 @@ export default function MapView({
         onStepsUpdate?.(steps);
       }
     );
-  }, [mapReady, location, destination, onStepsUpdate]);
+  }, [mapReady, location, destination, onStepsUpdate, onRouteDataUpdate]);
 
   return (
     <div
