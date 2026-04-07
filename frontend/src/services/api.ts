@@ -20,36 +20,17 @@ type NavigationPayload = {
     placeId?: string;
     locationType?: string;
     partialMatch?: boolean;
-  } | null;
-} | null;
-
-function buildJsonHeaders() {
-  return {
-    "Content-Type": "application/json",
   };
-}
-
-async function readJsonSafe(res: Response) {
-  const text = await res.text();
-
-  if (!text) return null;
-
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
+} | null;
 
 export async function checkHealth() {
   const res = await fetch(`${API_URL}/api/health`);
-  const data = await readJsonSafe(res);
 
   if (!res.ok) {
-    throw new Error(data?.error || "Falha ao verificar backend");
+    throw new Error("Falha ao verificar backend");
   }
 
-  return data;
+  return res.json();
 }
 
 export async function sendChatMessage(
@@ -59,7 +40,9 @@ export async function sendChatMessage(
 ) {
   const res = await fetch(`${API_URL}/api/chat`, {
     method: "POST",
-    headers: buildJsonHeaders(),
+    headers: {
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({
       message,
       deviceLocation: deviceLocation || null,
@@ -67,7 +50,7 @@ export async function sendChatMessage(
     }),
   });
 
-  const data = await readJsonSafe(res);
+  const data = await res.json();
 
   if (!res.ok) {
     throw new Error(data?.error || "Erro ao enviar mensagem");
@@ -83,7 +66,9 @@ export async function suggestNavigation(
 ) {
   const res = await fetch(`${API_URL}/api/navigation/suggest`, {
     method: "POST",
-    headers: buildJsonHeaders(),
+    headers: {
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({
       input,
       deviceLocation: deviceLocation || null,
@@ -91,7 +76,7 @@ export async function suggestNavigation(
     }),
   });
 
-  const data = await readJsonSafe(res);
+  const data = await res.json();
 
   if (!res.ok) {
     throw new Error(data?.error || "Erro ao buscar sugestões");
@@ -102,7 +87,8 @@ export async function suggestNavigation(
 
 export async function getNavigationQuickAccess() {
   const res = await fetch(`${API_URL}/api/navigation/quick-access`);
-  const data = await readJsonSafe(res);
+
+  const data = await res.json();
 
   if (!res.ok) {
     throw new Error(data?.error || "Erro ao buscar atalhos");
@@ -118,7 +104,9 @@ export async function resolveNavigationDestination(
 ) {
   const res = await fetch(`${API_URL}/api/navigation/resolve`, {
     method: "POST",
-    headers: buildJsonHeaders(),
+    headers: {
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify({
       input,
       deviceLocation: deviceLocation || null,
@@ -126,7 +114,7 @@ export async function resolveNavigationDestination(
     }),
   });
 
-  const data = await readJsonSafe(res);
+  const data = await res.json();
 
   if (!res.ok) {
     throw new Error(data?.error || "Erro ao resolver destino");
