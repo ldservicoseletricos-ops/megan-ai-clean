@@ -25,10 +25,21 @@ type CurrentLocation = {
   accuracy?: number | null;
 } | null;
 
+type RouteSummary = {
+  distanceText: string;
+  distanceMeters: number;
+  durationText: string;
+  durationSeconds: number;
+  trafficDurationText?: string;
+  trafficDurationSeconds?: number;
+  destinationLabel?: string;
+} | null;
+
 type DrivingModeProps = {
   destination?: Destination;
   steps?: Step[];
   currentLocation?: CurrentLocation;
+  routeSummary?: RouteSummary;
 };
 
 function cleanInstruction(text: string) {
@@ -103,6 +114,7 @@ export default function DrivingMode({
   destination = null,
   steps = [],
   currentLocation = null,
+  routeSummary = null,
 }: DrivingModeProps) {
   const [speed, setSpeed] = useState(0);
   const [eta, setEta] = useState("--");
@@ -220,6 +232,18 @@ export default function DrivingMode({
       return;
     }
   }, [destination]);
+
+  useEffect(() => {
+    if (!routeSummary) return;
+
+    if (routeSummary.trafficDurationText || routeSummary.durationText) {
+      setEta(routeSummary.trafficDurationText || routeSummary.durationText);
+    }
+
+    if (routeSummary.distanceText) {
+      setDistance(routeSummary.distanceText);
+    }
+  }, [routeSummary]);
 
   useEffect(() => {
     if (!cleanedSteps.length) {
@@ -364,19 +388,19 @@ export default function DrivingMode({
         style={{
           background: "rgba(255,255,255,0.06)",
           borderRadius: 12,
-          padding: "12px 14px",
+          padding: "14px 14px 12px",
+          border: "1px solid rgba(255,255,255,0.06)",
         }}
       >
-        <div style={{ fontSize: 12, opacity: 0.72, marginBottom: 6 }}>
+        <div style={{ fontSize: 12, opacity: 0.72, marginBottom: 8 }}>
           Próxima instrução
         </div>
-        <div style={{ fontSize: 18, fontWeight: 800, lineHeight: 1.35 }}>
+        <div style={{ fontSize: 20, fontWeight: 800, lineHeight: 1.2 }}>
           {nextInstruction}
         </div>
-
         {nextDistance ? (
-          <div style={{ fontSize: 13, opacity: 0.8, marginTop: 8 }}>
-            Aproximadamente {nextDistance}
+          <div style={{ marginTop: 8, fontSize: 13, opacity: 0.82 }}>
+            {nextDistance}
           </div>
         ) : null}
       </div>
@@ -385,63 +409,63 @@ export default function DrivingMode({
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
-          gap: "12px",
+          gap: 10,
         }}
       >
         <div
           style={{
-            background: "rgba(255,255,255,0.04)",
-            borderRadius: "12px",
+            background: "rgba(255,255,255,0.06)",
+            borderRadius: 12,
             padding: "10px 12px",
           }}
         >
-          <div style={{ fontSize: 12, opacity: 0.7 }}>Velocidade</div>
-          <div style={{ fontSize: 22, fontWeight: 800, marginTop: 2 }}>
-            {speed} km/h
-          </div>
+          <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 6 }}>Velocidade</div>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>{speed} km/h</div>
         </div>
 
         <div
           style={{
-            background: "rgba(255,255,255,0.04)",
-            borderRadius: "12px",
+            background: "rgba(255,255,255,0.06)",
+            borderRadius: 12,
             padding: "10px 12px",
           }}
         >
-          <div style={{ fontSize: 12, opacity: 0.7 }}>Distância</div>
-          <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
-            {distance}
-          </div>
+          <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 6 }}>Tempo</div>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>{eta}</div>
         </div>
 
         <div
           style={{
-            background: "rgba(255,255,255,0.04)",
-            borderRadius: "12px",
+            background: "rgba(255,255,255,0.06)",
+            borderRadius: 12,
             padding: "10px 12px",
           }}
         >
-          <div style={{ fontSize: 12, opacity: 0.7 }}>Chegada</div>
-          <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
-            {eta}
-          </div>
+          <div style={{ fontSize: 11, opacity: 0.72, marginBottom: 6 }}>Distância</div>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>{distance}</div>
         </div>
       </div>
 
-      {alert && (
+      {alert ? (
         <div
           style={{
-            background: "rgba(220,38,38,0.95)",
+            background: "rgba(180,83,9,0.95)",
+            border: "1px solid rgba(251,191,36,0.28)",
+            borderRadius: 12,
             padding: "10px 12px",
-            borderRadius: 10,
+            fontSize: 13,
             fontWeight: 700,
-            fontSize: 14,
-            lineHeight: 1.4,
           }}
         >
-          ⚠️ {alert}
+          {alert}
         </div>
-      )}
+      ) : null}
+
+      {destination?.name ? (
+        <div style={{ fontSize: 12, opacity: 0.74 }}>
+          Destino: {destination.name}
+        </div>
+      ) : null}
     </div>
   );
 }

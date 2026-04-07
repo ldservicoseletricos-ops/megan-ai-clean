@@ -33,14 +33,7 @@ function normalizeText(value) {
 function isCancelNavigationRequest(message) {
   const text = normalizeText(message);
 
-  const commands = [
-    "cancelar",
-    "parar",
-    "encerrar",
-    "fechar",
-    "terminar",
-  ];
-
+  const commands = ["cancelar", "parar", "encerrar", "fechar", "terminar"];
   const keywords = [
     "rota",
     "navegacao",
@@ -163,7 +156,7 @@ function pushSessionMessage(role, content) {
 
 export async function chatController(req, res) {
   try {
-    const { message, deviceLocation } = req.body || {};
+    const { message, deviceLocation, navigationPayload } = req.body || {};
     const text = String(message || "").trim();
     const location = normalizeLocationPayload(deviceLocation);
 
@@ -233,17 +226,33 @@ export async function chatController(req, res) {
     }
 
     /* =========================
-       NOVA NAVEGAÇÃO
+       NOVA NAVEGAÇÃO (CORRIGIDO 🔥)
     ========================= */
 
     const nav = detectNavigationIntent(text);
 
-    if (nav.isNavigationRequest) {
-      const destination = {
-        latitude: -23.5505,
-        longitude: -46.6333,
-        name: nav.destinationText || "Destino",
-      };
+    if (nav.isNavigationRequest || navigationPayload?.destination) {
+      let destination = null;
+
+      // ✅ PRIORIDADE: destino vindo do frontend (corrigido)
+      if (navigationPayload?.destination) {
+        destination = {
+          latitude: Number(navigationPayload.destination.latitude),
+          longitude: Number(navigationPayload.destination.longitude),
+          name:
+            navigationPayload.destination.formattedAddress ||
+            navigationPayload.destination.address ||
+            navigationPayload.destination.name ||
+            "Destino",
+        };
+      } else {
+        // fallback simples (caso não venha do frontend)
+        destination = {
+          latitude: -23.5505,
+          longitude: -46.6333,
+          name: nav.destinationText || "Destino",
+        };
+      }
 
       setActiveNavigation(destination);
       addRecentDestination(destination);
@@ -263,28 +272,23 @@ export async function chatController(req, res) {
     }
 
     /* =========================
-       IA NORMAL
+       RESPOSTA NORMAL
     ========================= */
 
-    if (ai) {
-      const response = await ai.models.generateContent({
-        model: env.geminiModel,
-        contents: text,
-      });
+    const reply = "Mensagem recebida.";
 
-      const reply =
-        response?.text ||
-        response?.candidates?.[0]?.content?.parts?.[0]?.text ||
-        "Mensagem recebida";
+    pushSessionMessage("assistant", reply);
 
-      pushSessionMessage("assistant", reply);
-
-      return res.json({ ok: true, reply });
-    }
-
-    return res.json({ ok: true, reply: "Mensagem recebida." });
+    return res.json({
+      ok: true,
+      reply,
+    });
   } catch (error) {
-    console.error(error);
-    return res.status(500).json({ ok: false, error: "Erro no chat" });
+    console.error("Erro chatController:", error);
+
+    return res.status(500).json({
+      ok: false,
+      error: "Erro interno no chat",
+    });
   }
 }
