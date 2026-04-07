@@ -8,12 +8,138 @@ type DeviceLocation = {
   speed?: number | null;
 } | null;
 
-/* =========================
-   🔥 RESOLVE DESTINO VIA BACKEND
-========================= */
+type DestinationPayload = {
+  latitude: number;
+  longitude: number;
+  name?: string;
+  address?: string;
+  formattedAddress?: string;
+  source?: string;
+  placeId?: string;
+  locationType?: string;
+  partialMatch?: boolean;
+};
+
+type NavigationPayload = {
+  placeId?: string;
+  destination?: DestinationPayload;
+} | null;
+
+type ResolveNavigationResponse = {
+  ok?: boolean;
+  destination?: DestinationPayload | null;
+  suggestions?: Array<{
+    text: string;
+    query?: string;
+    placeId?: string;
+    type?: "favorite" | "recent" | "google";
+  }>;
+  favorites?: Array<{
+    id?: string;
+    label?: string;
+    address?: string;
+    name?: string;
+  }>;
+  recent?: Array<{
+    id?: string;
+    label?: string;
+    address?: string;
+    name?: string;
+  }>;
+  error?: string;
+};
+
+export async function checkHealth() {
+  const res = await fetch(`${API_URL}/api/health`);
+
+  if (!res.ok) {
+    throw new Error("Falha ao verificar backend");
+  }
+
+  return res.json();
+}
+
+export async function sendChatMessage(
+  message: string,
+  deviceLocation?: DeviceLocation,
+  navigationPayload?: NavigationPayload
+) {
+  const res = await fetch(`${API_URL}/api/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      message,
+      deviceLocation: deviceLocation || null,
+      navigationPayload: navigationPayload || null,
+    }),
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(data?.error || "Erro ao enviar mensagem");
+  }
+
+  return data;
+}
+
+export async function suggestNavigation(
+  input: string,
+  deviceLocation?: DeviceLocation,
+  sessionToken?: string
+) {
+  try {
+    const res = await fetch(`${API_URL}/api/navigation/suggest`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        input,
+        deviceLocation: deviceLocation || null,
+        sessionToken: sessionToken || null,
+      }),
+    });
+
+    const data: ResolveNavigationResponse = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      return { suggestions: [] };
+    }
+
+    return {
+      suggestions: Array.isArray(data?.suggestions) ? data.suggestions : [],
+    };
+  } catch {
+    return { suggestions: [] };
+  }
+}
+
+export async function getNavigationQuickAccess() {
+  try {
+    const res = await fetch(`${API_URL}/api/navigation/quick-access`);
+
+    const data: ResolveNavigationResponse = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      return { favorites: [], recent: [] };
+    }
+
+    return {
+      favorites: Array.isArray(data?.favorites) ? data.favorites : [],
+      recent: Array.isArray(data?.recent) ? data.recent : [],
+    };
+  } catch {
+    return { favorites: [], recent: [] };
+  }
+}
+
 export async function resolveNavigationDestination(
   input: string,
-  deviceLocation?: DeviceLocation
+  deviceLocation?: DeviceLocation,
+  placeId?: string
 ) {
   try {
     const res = await fetch(`${API_URL}/api/navigation/resolve`, {
@@ -23,58 +149,19 @@ export async function resolveNavigationDestination(
       },
       body: JSON.stringify({
         input,
-        deviceLocation,
+        deviceLocation: deviceLocation || null,
+        placeId: placeId || null,
       }),
     });
 
-    const data = await res.json();
+    const data: ResolveNavigationResponse = await res.json().catch(() => ({}));
 
-    if (!res.ok) return null;
+    if (!res.ok) {
+      return null;
+    }
 
     return data;
   } catch {
     return null;
   }
-}
-
-/* =========================
-   CHAT
-========================= */
-export async function sendChatMessage(
-  message: string,
-  deviceLocation?: DeviceLocation
-) {
-  /* 🔥 PRIMEIRO tenta resolver destino */
-  const resolved = await resolveNavigationDestination(
-    message,
-    deviceLocation
-  );
-
-  let navigationPayload = null;
-
-  if (resolved?.destination) {
-    navigationPayload = {
-      destination: resolved.destination,
-    };
-  }
-
-  const res = await fetch(`${API_URL}/api/chat`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      message,
-      deviceLocation,
-      navigationPayload,
-    }),
-  });
-
-  const data = await res.json();
-
-  if (!res.ok) {
-    throw new Error(data?.error || "Erro no chat");
-  }
-
-  return data;
 }
