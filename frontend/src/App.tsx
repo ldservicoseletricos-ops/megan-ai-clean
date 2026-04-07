@@ -213,8 +213,6 @@ export default function App() {
   const [steps, setSteps] = useState<Step[]>([]);
   const [recenterSignal, setRecenterSignal] = useState(0);
 
-  // navigationActive = rota ativa de verdade
-  // showNavigationMap = somente tela do mapa aberta/fechada
   const [navigationActive, setNavigationActive] = useState(false);
   const [showNavigationMap, setShowNavigationMap] = useState(false);
 
@@ -224,6 +222,8 @@ export default function App() {
   const [favorites, setFavorites] = useState<QuickAccessItem[]>([]);
   const [recent, setRecent] = useState<QuickAccessItem[]>([]);
 
+  const [isMobile, setIsMobile] = useState(false);
+
   const debounceRef = useRef<number | null>(null);
   const sessionTokenRef = useRef(generateSessionToken());
   const lastAcceptedLocationRef = useRef<DeviceLocation | null>(null);
@@ -231,6 +231,17 @@ export default function App() {
 
   useEffect(() => {
     checkHealth().then(() => setStatus("Online")).catch(() => setStatus("Offline"));
+  }, []);
+
+  useEffect(() => {
+    const handleResize = () => {
+      setIsMobile(window.innerWidth <= 768);
+    };
+
+    handleResize();
+    window.addEventListener("resize", handleResize);
+
+    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   useEffect(() => {
@@ -380,13 +391,10 @@ export default function App() {
   }
 
   function voltarAoChat() {
-    // fecha só a tela do mapa
-    // a navegação continua ativa
     setShowNavigationMap(false);
   }
 
   function cancelarNavegacao() {
-    // encerra a navegação de verdade
     setNavigationActive(false);
     setShowNavigationMap(false);
     setDestination(null);
@@ -500,12 +508,13 @@ export default function App() {
         <div
           style={{
             position: "absolute",
-            top: 16,
-            left: 16,
+            top: isMobile ? 10 : 16,
+            left: isMobile ? 10 : 16,
             zIndex: 1002,
             display: "flex",
             gap: 10,
             flexWrap: "wrap",
+            right: isMobile ? 10 : "auto",
           }}
         >
           <button
@@ -515,11 +524,13 @@ export default function App() {
               color: "#fff",
               border: "1px solid rgba(255,255,255,0.12)",
               borderRadius: 12,
-              padding: "10px 14px",
+              padding: isMobile ? "12px 14px" : "10px 14px",
               cursor: "pointer",
               fontWeight: 700,
               boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
               backdropFilter: "blur(8px)",
+              fontSize: isMobile ? 14 : 14,
+              flex: isMobile ? 1 : "initial",
             }}
           >
             ← Voltar ao chat
@@ -532,11 +543,13 @@ export default function App() {
               color: "#fff",
               border: "1px solid rgba(255,255,255,0.12)",
               borderRadius: 12,
-              padding: "10px 14px",
+              padding: isMobile ? "12px 14px" : "10px 14px",
               cursor: "pointer",
               fontWeight: 700,
               boxShadow: "0 8px 24px rgba(0,0,0,0.25)",
               backdropFilter: "blur(8px)",
+              fontSize: isMobile ? 14 : 14,
+              flex: isMobile ? 1 : "initial",
             }}
           >
             Encerrar navegação
@@ -547,11 +560,13 @@ export default function App() {
           <div
             style={{
               position: "absolute",
-              top: 16,
-              right: 16,
+              top: isMobile ? "auto" : 16,
+              bottom: isMobile ? 10 : "auto",
+              right: isMobile ? 10 : 16,
+              left: isMobile ? 10 : "auto",
               zIndex: 1002,
-              width: 360,
-              maxWidth: "calc(100vw - 32px)",
+              width: isMobile ? "auto" : 360,
+              maxWidth: isMobile ? "none" : "calc(100vw - 32px)",
             }}
           >
             <DrivingMode
@@ -575,99 +590,108 @@ export default function App() {
   }
 
   return (
-    <div style={{ display: "flex", height: "100vh", background: "#343541" }}>
-      <aside
-        style={{
-          width: 260,
-          background: "#202123",
-          padding: 20,
-          color: "#fff",
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "space-between",
-          gap: 20,
-        }}
-      >
-        <div>
-          <h2>Megan OS</h2>
-          <p style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</p>
-
-          <div style={{ marginTop: 20 }}>
-            <h3 style={{ fontSize: 14, marginBottom: 10 }}>Favoritos</h3>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {favorites.map((item, index) => (
-                <button
-                  key={`${item.id || item.label || item.address}-${index}`}
-                  onClick={() => handleQuickAccessClick(item)}
-                  style={{
-                    textAlign: "left",
-                    background: "#2a2b32",
-                    color: "#fff",
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    cursor: "pointer",
-                    fontSize: 13,
-                  }}
-                >
-                  ⭐ {item.label || item.name}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div style={{ marginTop: 20 }}>
-            <h3 style={{ fontSize: 14, marginBottom: 10 }}>Recentes</h3>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {recent.length === 0 && (
-                <div style={{ fontSize: 12, opacity: 0.65 }}>
-                  Nenhum destino recente
-                </div>
-              )}
-
-              {recent.map((item, index) => (
-                <button
-                  key={`${item.name || item.address}-${index}`}
-                  onClick={() => handleQuickAccessClick(item)}
-                  style={{
-                    textAlign: "left",
-                    background: "#2a2b32",
-                    color: "#fff",
-                    border: "1px solid rgba(255,255,255,0.08)",
-                    padding: "10px 12px",
-                    borderRadius: 10,
-                    cursor: "pointer",
-                    fontSize: 13,
-                  }}
-                >
-                  🕘 {item.name || item.address}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <button
-          onClick={() => {
-            if (navigationActive) {
-              abrirTelaNavegacao();
-            }
-          }}
+    <div
+      style={{
+        display: "flex",
+        flexDirection: isMobile ? "column" : "row",
+        height: "100vh",
+        background: "#343541",
+      }}
+    >
+      {!isMobile && (
+        <aside
           style={{
-            background: navigationActive ? "#10a37f" : "#374151",
-            border: "none",
-            padding: 12,
-            borderRadius: 8,
+            width: 260,
+            background: "#202123",
+            padding: 20,
             color: "#fff",
-            cursor: navigationActive ? "pointer" : "not-allowed",
-            opacity: navigationActive ? 1 : 0.65,
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "space-between",
+            gap: 20,
           }}
         >
-          🗺️ {navigationActive ? "Voltar para navegação" : "Sem navegação ativa"}
-        </button>
-      </aside>
+          <div>
+            <h2>Megan OS</h2>
+            <p style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</p>
+
+            <div style={{ marginTop: 20 }}>
+              <h3 style={{ fontSize: 14, marginBottom: 10 }}>Favoritos</h3>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {favorites.map((item, index) => (
+                  <button
+                    key={`${item.id || item.label || item.address}-${index}`}
+                    onClick={() => handleQuickAccessClick(item)}
+                    style={{
+                      textAlign: "left",
+                      background: "#2a2b32",
+                      color: "#fff",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      cursor: "pointer",
+                      fontSize: 13,
+                    }}
+                  >
+                    ⭐ {item.label || item.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ marginTop: 20 }}>
+              <h3 style={{ fontSize: 14, marginBottom: 10 }}>Recentes</h3>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {recent.length === 0 && (
+                  <div style={{ fontSize: 12, opacity: 0.65 }}>
+                    Nenhum destino recente
+                  </div>
+                )}
+
+                {recent.map((item, index) => (
+                  <button
+                    key={`${item.name || item.address}-${index}`}
+                    onClick={() => handleQuickAccessClick(item)}
+                    style={{
+                      textAlign: "left",
+                      background: "#2a2b32",
+                      color: "#fff",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      cursor: "pointer",
+                      fontSize: 13,
+                    }}
+                  >
+                    🕘 {item.name || item.address}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <button
+            onClick={() => {
+              if (navigationActive) {
+                abrirTelaNavegacao();
+              }
+            }}
+            style={{
+              background: navigationActive ? "#10a37f" : "#374151",
+              border: "none",
+              padding: 12,
+              borderRadius: 8,
+              color: "#fff",
+              cursor: navigationActive ? "pointer" : "not-allowed",
+              opacity: navigationActive ? 1 : 0.65,
+            }}
+          >
+            🗺️ {navigationActive ? "Voltar para navegação" : "Sem navegação ativa"}
+          </button>
+        </aside>
+      )}
 
       <main
         style={{
@@ -676,9 +700,55 @@ export default function App() {
           flexDirection: "column",
           justifyContent: "space-between",
           position: "relative",
+          minWidth: 0,
         }}
       >
-        <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
+        {isMobile && (
+          <div
+            style={{
+              padding: "14px 16px",
+              borderBottom: "1px solid #444",
+              background: "#202123",
+              color: "#fff",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+            }}
+          >
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 800 }}>Megan OS</div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>Status: {status}</div>
+            </div>
+
+            {navigationActive && (
+              <button
+                onClick={abrirTelaNavegacao}
+                style={{
+                  background: "#10a37f",
+                  border: "none",
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  color: "#fff",
+                  cursor: "pointer",
+                  fontWeight: 700,
+                  fontSize: 13,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Abrir mapa
+              </button>
+            )}
+          </div>
+        )}
+
+        <div
+          style={{
+            flex: 1,
+            overflowY: "auto",
+            padding: isMobile ? 12 : 20,
+          }}
+        >
           {messages.map((m, i) => (
             <div
               key={i}
@@ -691,11 +761,13 @@ export default function App() {
               <div
                 style={{
                   background: m.role === "user" ? "#10a37f" : "#444654",
-                  padding: 12,
+                  padding: isMobile ? 10 : 12,
                   borderRadius: 10,
-                  maxWidth: "60%",
+                  maxWidth: isMobile ? "85%" : "60%",
                   color: "#fff",
                   whiteSpace: "pre-wrap",
+                  fontSize: isMobile ? 14 : 16,
+                  lineHeight: 1.45,
                 }}
               >
                 {m.content}
@@ -707,19 +779,20 @@ export default function App() {
         {navigationActive && destination && (
           <div
             style={{
-              margin: "0 20px 12px 20px",
+              margin: isMobile ? "0 12px 10px 12px" : "0 20px 12px 20px",
               background: "rgba(16,163,127,0.12)",
               border: "1px solid rgba(16,163,127,0.35)",
               color: "#d1fae5",
               borderRadius: 12,
-              padding: "12px 14px",
+              padding: isMobile ? "10px 12px" : "12px 14px",
               display: "flex",
-              alignItems: "center",
+              flexDirection: isMobile ? "column" : "row",
+              alignItems: isMobile ? "stretch" : "center",
               justifyContent: "space-between",
-              gap: 12,
+              gap: 10,
             }}
           >
-            <div style={{ fontSize: 14 }}>
+            <div style={{ fontSize: isMobile ? 13 : 14 }}>
               Navegação ativa{destination?.name ? `: ${destination.name}` : "."}
             </div>
 
@@ -734,6 +807,8 @@ export default function App() {
                   color: "#fff",
                   cursor: "pointer",
                   fontWeight: 700,
+                  fontSize: 13,
+                  flex: isMobile ? 1 : "initial",
                 }}
               >
                 Abrir mapa
@@ -749,6 +824,8 @@ export default function App() {
                   color: "#fff",
                   cursor: "pointer",
                   fontWeight: 700,
+                  fontSize: 13,
+                  flex: isMobile ? 1 : "initial",
                 }}
               >
                 Cancelar navegação
@@ -757,20 +834,28 @@ export default function App() {
           </div>
         )}
 
-        <div style={{ padding: 20, borderTop: "1px solid #444", position: "relative" }}>
+        <div
+          style={{
+            padding: isMobile ? 12 : 20,
+            borderTop: "1px solid #444",
+            position: "relative",
+          }}
+        >
           {(suggestions.length > 0 || isSuggesting) && (
             <div
               style={{
                 position: "absolute",
-                left: 20,
-                right: 20,
-                bottom: 84,
+                left: isMobile ? 12 : 20,
+                right: isMobile ? 12 : 20,
+                bottom: isMobile ? 78 : 84,
                 background: "#1f2937",
                 border: "1px solid rgba(255,255,255,0.12)",
                 borderRadius: 14,
                 boxShadow: "0 12px 32px rgba(0,0,0,0.35)",
                 overflow: "hidden",
                 zIndex: 20,
+                maxHeight: isMobile ? 220 : 320,
+                overflowY: "auto",
               }}
             >
               {isSuggesting && suggestions.length === 0 && (
@@ -810,7 +895,13 @@ export default function App() {
             </div>
           )}
 
-          <div style={{ display: "flex", gap: 10 }}>
+          <div
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "stretch",
+            }}
+          >
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -820,10 +911,12 @@ export default function App() {
               placeholder="Digite uma mensagem ou peça navegação..."
               style={{
                 flex: 1,
-                padding: 12,
+                padding: isMobile ? 14 : 12,
                 borderRadius: 8,
                 border: "none",
                 outline: "none",
+                fontSize: isMobile ? 16 : 14,
+                minWidth: 0,
               }}
             />
             <button
@@ -831,10 +924,13 @@ export default function App() {
               style={{
                 background: "#10a37f",
                 border: "none",
-                padding: "0 20px",
+                padding: isMobile ? "0 16px" : "0 20px",
                 borderRadius: 8,
                 color: "#fff",
                 cursor: "pointer",
+                fontSize: isMobile ? 15 : 14,
+                fontWeight: 700,
+                whiteSpace: "nowrap",
               }}
             >
               Enviar
