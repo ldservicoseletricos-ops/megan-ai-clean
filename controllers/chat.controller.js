@@ -18,10 +18,6 @@ const ai = env.geminiApiKey
 const destinationCache = new Map();
 const sessions = [];
 
-/* =========================
-   HELPERS
-========================= */
-
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -150,10 +146,6 @@ function pushSessionMessage(role, content) {
   }
 }
 
-/* =========================
-   CONTROLLER
-========================= */
-
 export async function chatController(req, res) {
   try {
     const { message, deviceLocation, navigationPayload } = req.body || {};
@@ -165,10 +157,6 @@ export async function chatController(req, res) {
     }
 
     pushSessionMessage("user", text);
-
-    /* =========================
-       CANCELAR NAVEGAÇÃO
-    ========================= */
 
     if (isCancelNavigationRequest(text)) {
       clearActiveNavigation();
@@ -187,10 +175,6 @@ export async function chatController(req, res) {
         },
       });
     }
-
-    /* =========================
-       DESTINO ATUAL
-    ========================= */
 
     if (hasActiveNavigation()) {
       const current = getActiveNavigation();
@@ -225,16 +209,11 @@ export async function chatController(req, res) {
       }
     }
 
-    /* =========================
-       NOVA NAVEGAÇÃO (CORRIGIDO 🔥)
-    ========================= */
-
     const nav = detectNavigationIntent(text);
 
     if (nav.isNavigationRequest || navigationPayload?.destination) {
       let destination = null;
 
-      // ✅ PRIORIDADE: destino vindo do frontend (corrigido)
       if (navigationPayload?.destination) {
         destination = {
           latitude: Number(navigationPayload.destination.latitude),
@@ -244,39 +223,43 @@ export async function chatController(req, res) {
             navigationPayload.destination.address ||
             navigationPayload.destination.name ||
             "Destino",
+          address: navigationPayload.destination.address || "",
+          formattedAddress:
+            navigationPayload.destination.formattedAddress || "",
         };
       } else {
-        // fallback simples (caso não venha do frontend)
         destination = {
-          latitude: -23.5505,
-          longitude: -46.6333,
+          latitude: null,
+          longitude: null,
           name: nav.destinationText || "Destino",
         };
       }
 
-      setActiveNavigation(destination);
-      addRecentDestination(destination);
+      if (
+        destination.latitude !== null &&
+        destination.longitude !== null &&
+        !Number.isNaN(destination.latitude) &&
+        !Number.isNaN(destination.longitude)
+      ) {
+        setActiveNavigation(destination);
+        addRecentDestination(destination);
 
-      const reply = `🚗 Iniciando navegação para ${destination.name}`;
+        const reply = `🚗 Iniciando navegação para ${destination.name}`;
 
-      return res.json({
-        ok: true,
-        reply,
-        meta: {
-          navigation: {
-            active: true,
-            destination,
+        return res.json({
+          ok: true,
+          reply,
+          meta: {
+            navigation: {
+              active: true,
+              destination,
+            },
           },
-        },
-      });
+        });
+      }
     }
 
-    /* =========================
-       RESPOSTA NORMAL
-    ========================= */
-
     const reply = "Mensagem recebida.";
-
     pushSessionMessage("assistant", reply);
 
     return res.json({
