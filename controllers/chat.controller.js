@@ -24,18 +24,31 @@ function normalizeText(value) {
 function isCancelNavigationRequest(message) {
   const text = normalizeText(message);
 
-  return (
+  const hasCommand =
     text.includes("cancelar") ||
     text.includes("parar") ||
-    text.includes("encerrar")
-  );
+    text.includes("encerrar") ||
+    text.includes("fechar");
+
+  const hasNavigationWord =
+    text.includes("rota") ||
+    text.includes("navegacao") ||
+    text.includes("navegação") ||
+    text.includes("trajeto");
+
+  return hasCommand && hasNavigationWord;
 }
 
 function cleanDestinationText(text) {
   return String(text || "")
     .replace(/^navegar para\s+/i, "")
+    .replace(/^navegar pra\s+/i, "")
     .replace(/^ir para\s+/i, "")
+    .replace(/^ir pra\s+/i, "")
     .replace(/^rota para\s+/i, "")
+    .replace(/^rota pra\s+/i, "")
+    .replace(/^me leve para\s+/i, "")
+    .replace(/^levar para\s+/i, "")
     .trim();
 }
 
@@ -45,15 +58,25 @@ function detectNavigationIntent(message) {
   const isCommand =
     text.startsWith("navegar") ||
     text.startsWith("ir para") ||
-    text.startsWith("rota");
+    text.startsWith("ir pra") ||
+    text.startsWith("rota") ||
+    text.startsWith("me leve") ||
+    text.startsWith("levar para");
 
   const looksLikePlace =
     text.includes("rua") ||
     text.includes("avenida") ||
-    text.includes("av") ||
+    text.includes("av ") ||
+    text.includes("estrada") ||
+    text.includes("rodovia") ||
     text.includes("shopping") ||
     text.includes("centro") ||
-    text.includes("bairro");
+    text.includes("bairro") ||
+    text.includes("hospital") ||
+    text.includes("mercado") ||
+    text.includes("farmacia") ||
+    text.includes("farmácia") ||
+    /\b\d{1,6}\b/.test(text);
 
   return {
     isNavigationRequest: isCommand || looksLikePlace,
@@ -67,9 +90,63 @@ function normalizeLocation(deviceLocation) {
   const lat = Number(deviceLocation.latitude);
   const lng = Number(deviceLocation.longitude);
 
-  if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+  if (Number.isNaN(lat) || Number.isNaN(lng)) {
+    return null;
+  }
 
-  return { latitude: lat, longitude: lng };
+  return {
+    latitude: lat,
+    longitude: lng,
+  };
+}
+
+function hasValidCoordinates(destination) {
+  if (!destination) return false;
+
+  const lat = Number(destination.latitude);
+  const lng = Number(destination.longitude);
+
+  return Number.isFinite(lat) && Number.isFinite(lng);
+}
+
+function calculateDistanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function buildDistanceEtaReply(deviceLocation, destination) {
+  if (!deviceLocation || !destination || !hasValidCoordinates(destination)) {
+    return {
+      distance: "--",
+      eta: "--",
+      reply: "Preciso da localização atual e de um destino válido.",
+    };
+  }
+
+  const distanceKm = calculateDistanceKm(
+    Number(deviceLocation.latitude),
+    Number(deviceLocation.longitude),
+    Number(destination.latitude),
+    Number(destination.longitude)
+  );
+
+  const distance = `${distanceKm.toFixed(2)} km`;
+  const eta = `${Math.max(1, Math.round((distanceKm / 40) * 60))} min`;
+
+  return {
+    distance,
+    eta,
+    reply: `Distância: ${distance} • Tempo: ${eta}`,
+  };
 }
 
 export async function chatController(req, res) {
@@ -86,9 +163,6 @@ export async function chatController(req, res) {
       });
     }
 
-    /* =========================
-       CANCELAR NAVEGAÇÃO
-    ========================= */
     if (isCancelNavigationRequest(text)) {
       clearActiveNavigation();
 
@@ -104,16 +178,32 @@ export async function chatController(req, res) {
       });
     }
 
-    /* =========================
-       NAVEGAÇÃO ATIVA
-    ========================= */
     if (hasActiveNavigation()) {
       const current = getActiveNavigation();
 
       if (normalizeText(text).includes("destino")) {
         return res.json({
           ok: true,
-          reply: `Destino atual: ${current.destination.name}`,
+          reply: `Destino atual: ${current.destination.name || "Destino"}`,
+          meta: {
+            navigation: {
+              active: true,
+              destination: current.destination,
+            },
+          },
+        });
+      }
+
+      if (
+        normalizeText(text).includes("quanto falta") ||
+        normalizeText(text).includes("tempo restante") ||
+        normalizeText(text).includes("distancia")
+      ) {
+        const info = buildDistanceEtaReply(location, current.destination);
+
+        return res.json({
+          ok: true,
+          reply: info.reply,
           meta: {
             navigation: {
               active: true,
@@ -124,9 +214,6 @@ export async function chatController(req, res) {
       }
     }
 
-    /* =========================
-       DETECTAR NAVEGAÇÃO
-    ========================= */
     const nav = detectNavigationIntent(text);
 
     if (
@@ -136,8 +223,7 @@ export async function chatController(req, res) {
     ) {
       let destination = null;
 
-      /* 🔥 PRIORIDADE: FRONTEND */
-      if (navigationPayload?.destination) {
+      if (navigationPayload?.destination && hasValidCoordinates(navigationPayload.destination)) {
         destination = {
           latitude: Number(navigationPayload.destination.latitude),
           longitude: Number(navigationPayload.destination.longitude),
@@ -146,17 +232,28 @@ export async function chatController(req, res) {
             navigationPayload.destination.address ||
             navigationPayload.destination.name ||
             "Destino",
-        };
-      } else {
-        /* 🔥 FORÇA DESTINO MESMO SEM COORDENADA */
-        destination = {
-          latitude: location?.latitude || -23.73557,
-          longitude: location?.longitude || -46.56095,
-          name: nav.destinationText || text,
+          address: navigationPayload.destination.address || "",
+          formattedAddress:
+            navigationPayload.destination.formattedAddress || "",
+          placeId: navigationPayload.destination.placeId || "",
+          source: navigationPayload.destination.source || "frontend",
         };
       }
 
-      /* 🔥 ATIVA NAVEGAÇÃO */
+      if (!destination) {
+        return res.json({
+          ok: true,
+          reply:
+            "Entendi o destino, mas ainda não consegui localizar esse endereço com precisão. Envie o endereço mais completo com rua, número, cidade e estado.",
+          meta: {
+            navigation: {
+              active: false,
+              destination: null,
+            },
+          },
+        });
+      }
+
       setActiveNavigation(destination);
       addRecentDestination(destination);
 
@@ -172,9 +269,6 @@ export async function chatController(req, res) {
       });
     }
 
-    /* =========================
-       FALLBACK
-    ========================= */
     return res.json({
       ok: true,
       reply: "Mensagem recebida.",
